@@ -1,0 +1,12 @@
+.venv/
+cache/
+computed_data/
+__pycache__/
+.idea/
+.pytest_cache/
+.engine/
+images/
+resources/
+outputs/
+.DS_Store
+*.log
