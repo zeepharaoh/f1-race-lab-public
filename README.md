@@ -82,7 +82,9 @@ Compare similar tyres and consider tyre age, fuel, traffic and weather. Median l
 
 In **Animated replay**, select a weekend and session, then choose **All drivers**, **Top three constructors** or **Choose drivers**. For **Choose drivers**, click **Load session drivers** first, then choose from **Replay drivers**. The roster includes the session's actual participants, including practice substitutes. Click **Open animated replay** when ready.
 
-**Sprint and Grand Prix replays** follow the field through the race timeline. Set their initial **Playback speed** in the dashboard or with `--speed`.
+**Sprint and Grand Prix replays** show cars moving around the track, a lap counter, race time, weather and a leaderboard. Select **All drivers** to show the full field. Set their initial **Playback speed** in the dashboard or with `--speed`.
+
+Click a driver on the replay's leaderboard to show a telemetry card with speed, gear, DRS status, throttle, braking and estimated gaps ahead and behind. Hold **Shift** and click other drivers to compare their cards. Shift-click a selected driver to remove their card; a regular click switches to one driver. Cards start hidden until a driver is selected. Enlarge the replay window to fit more cards.
 
 A **Lap Time & Gap Evolution** chart and **F1 Insights** menu open alongside race and Sprint replays. Use the menu for **Sector Times**, **Driver Live Telemetry**, **Live Tyre Strategy** and race-control messages. The views follow replay playback, including pause and seek; they are recorded data, not a live race feed. They use the drivers selected for the replay. The Insights menu and its charts close when the replay closes.
 
@@ -90,12 +92,18 @@ A **Lap Time & Gap Evolution** chart and **F1 Insights** menu open alongside rac
 
 The replay opens in a separate desktop window. Initial telemetry downloads and processing can take several minutes. Subsequent launches use local caches. Close the current replay window before opening another.
 
+Sprint and Grand Prix controls:
+
 | Control | Action |
 | --- | --- |
 | **Space** | Pause or resume |
 | **Hold Left / Right arrows** | Rewind or move forward |
 | **Up / Down arrows** | Change playback speed |
-| **Click a leaderboard driver** | Inspect driver telemetry |
+| **Click a leaderboard driver** | Show that driver's telemetry card |
+| **Shift + click a leaderboard driver** | Add or remove a comparison card |
+| **R** | Restart |
+| **L** | Toggle driver labels |
+| **H** | Show keyboard help |
 | **Escape** | Close the replay window |
 
 Launch from the desktop launcher or a desktop terminal to use graphical replays. A headless server can display the dashboard but cannot open a replay window.
@@ -170,6 +178,7 @@ Replay supports published 2026 sessions. `--session` accepts `FP1`, `FP2`, `FP3`
 | Replay takes several minutes | Allow the initial telemetry processing to finish. Inspect **Replay log** for progress. |
 | `Replay environment missing` | Check the engine folder, then run `sh setup.sh`. |
 | Replay cannot find a display | Start the app from a desktop terminal or launcher. |
+| Driver cards are missing | Click a driver on the replay leaderboard. Hold Shift and click others to compare; enlarge the window for more cards. |
 | Lap chart is empty | Click **Load lap analysis** and select drivers and tyres with available clean laps. |
 
 Dashboard-launched replay logs are saved to `outputs/replay.log`.
@@ -207,6 +216,7 @@ The replay uses [IAmTomShaw/f1-race-replay](https://github.com/IAmTomShaw/f1-rac
 - Clean laps require a recorded time, accurate and undeleted status, green track conditions throughout, and no pit entry or exit.
 - Lap times are not adjusted for fuel, tyre age, traffic, weather or strategy.
 - Replay car positions are interpolated. Leaderboard order is approximate, especially on lap 1, and Safety Car position is simulated.
+- Telemetry-card gaps are estimates from car positions and a fixed reference speed. Detected DRS zones come from one example lap and may be absent when its telemetry has no active DRS samples.
 - Practice and qualifying replays compare fastest laps. Drivers' laps may have been recorded at different times and in different conditions.
 - Point reconciliation checks accounting totals; it does not validate interpolated race positions.
 
