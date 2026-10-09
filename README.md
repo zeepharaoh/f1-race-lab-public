@@ -84,6 +84,8 @@ In **Animated replay**, select a weekend and session, then choose **All drivers*
 
 **Sprint and Grand Prix replays** follow the field through the race timeline. Set their initial **Playback speed** in the dashboard or with `--speed`.
 
+A **Lap Time & Gap Evolution** chart and **F1 Insights** menu open alongside race and Sprint replays. Use the menu for **Sector Times**, **Driver Live Telemetry**, **Live Tyre Strategy** and race-control messages. The views follow replay playback, including pause and seek; they are recorded data, not a live race feed. They use the drivers selected for the replay. The Insights menu and its charts close when the replay closes.
+
 **Practice, qualifying and Sprint qualifying replays** compare each selected driver's fastest lap on the track. They do not animate the entire session in chronological order. Click a driver in the replay window to load their lap. Qualifying also offers segment selection when the corresponding data is available. Change fastest-lap playback speed inside the replay window; the dashboard speed selector and `--speed` apply to Sprint and Grand Prix timelines only.
 
 The replay opens in a separate desktop window. Initial telemetry downloads and processing can take several minutes. Subsequent launches use local caches. Close the current replay window before opening another.
@@ -182,6 +184,7 @@ Dashboard-launched replay logs are saved to `outputs/replay.log`.
 | `data.py` | Downloads, snapshots, calculations and lap filtering |
 | `weekend.py` | Weekend schedules, session timing and classifications |
 | `main.py` | Animated replay launcher |
+| `replay_insights.py` | Replay lap charts and telemetry tools |
 | `season_analysis.py` | Static season charts |
 | `setup.sh` | Environment and dependency installation |
 | `requirements.txt` | Dashboard dependencies |

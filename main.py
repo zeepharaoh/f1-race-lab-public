@@ -3,6 +3,7 @@ from pathlib import Path
 import argparse
 import math
 import os
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent
@@ -76,11 +77,14 @@ def filter_replay_data(data, session_code, codes):
     return filtered, available, frame_count
 
 
-class PracticeSessionView:
-    """Use session metadata with filtered practice laps."""
-    def __init__(self, session, laps):
+class SessionView:
+    """Use session metadata with filtered driver data."""
+    def __init__(self, session, laps, results=None):
         self.source = session
         self.laps = laps
+        if results is not None:
+            self.results = results
+            self.drivers = results['DriverNumber'].tolist()
 
     def __getattr__(self, name):
         return getattr(self.source, name)
@@ -89,7 +93,7 @@ class PracticeSessionView:
 def practice_replay_data(session, session_code, engine_data):
     import pandas as pd
     from weekend import valid_timed_laps
-    view = PracticeSessionView(session, valid_timed_laps(session.laps))
+    view = SessionView(session, valid_timed_laps(session.laps))
     data = engine_data.get_practice_telemetry(view, session_type=session_code)
     rows = []
     for row in data.get('results', []):
@@ -199,6 +203,7 @@ def main(argv=None):
 
 def render_race(session, selected, data, title, speed, round_number, session_code, engine_data):
     import requests
+    from src.interfaces import race_replay as interface
     from src.run_session import run_arcade_replay
     lap = session.laps.pick_fastest()
     if lap is None:
@@ -209,18 +214,48 @@ def render_race(session, selected, data, title, speed, round_number, session_cod
     except (AttributeError, ValueError, requests.RequestException):
         rotation = 0.0
         print('Circuit rotation unavailable; using recorded track coordinates.', flush=True)
-    run_arcade_replay(
-        frames=data['frames'], track_statuses=data['track_statuses'], example_lap=example,
-        drivers=selected['DriverNumber'].tolist(), title=title,
-        playback_speed=speed, driver_colors=data['driver_colors'],
-        circuit_rotation=rotation, total_laps=data['total_laps'],
-        session=session, enable_telemetry=False,
-        race_control_messages=data.get('race_control_messages', []),
-        session_info={'event_name': session.event['EventName'], 'year': 2026,
-                      'round': round_number, 'country': session.event['Country'],
-                      'circuit_name': session.event['Location'],
-                      'date': str(session.date.date()), 'session': session_code,
-                      'total_laps': data['total_laps']})
+    view = SessionView(session, session.laps[session.laps.Driver.isin(selected['Abbreviation'])], selected)
+    insights = None
+    server_type = interface.TelemetryStreamServer
+    stream = server_type(port=0)
+    start_stream = stream.start
+
+    def start_insights_stream():
+        nonlocal insights
+        start_stream()
+        port = stream.server_socket.getsockname()[1]
+        try:
+            insights = subprocess.Popen([sys.executable, str(ROOT / 'replay_insights.py'),
+                                         '--port', str(port)], cwd=ENGINE)
+        except OSError as error:
+            print(f'Insights window could not start: {error}', flush=True)
+
+    stream.start = start_insights_stream
+    interface.TelemetryStreamServer = lambda: stream
+    try:
+        run_arcade_replay(
+            frames=data['frames'], track_statuses=data['track_statuses'], example_lap=example,
+            drivers=selected['DriverNumber'].tolist(), title=title,
+            playback_speed=speed, driver_colors=data['driver_colors'],
+            circuit_rotation=rotation, total_laps=data['total_laps'],
+            session=view, enable_telemetry=True,
+            race_control_messages=data.get('race_control_messages', []),
+            session_info={'event_name': session.event['EventName'], 'year': 2026,
+                          'round': round_number, 'country': session.event['Country'],
+                          'circuit_name': session.event['Location'],
+                          'date': str(session.date.date()), 'session': session_code,
+                          'total_laps': data['total_laps'],
+                          'circuit_length_m': float(example['Distance'].max())})
+    finally:
+        interface.TelemetryStreamServer = server_type
+        stream.stop()
+        if insights is not None and insights.poll() is None:
+            insights.terminate()
+            try:
+                insights.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                insights.kill()
+                insights.wait()
 
 
 if __name__ == '__main__':

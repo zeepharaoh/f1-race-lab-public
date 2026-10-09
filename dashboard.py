@@ -356,6 +356,7 @@ def app():
             replay_round, replay_code, replay_started = choose_session(schedule, 'replay')
             if replay_code in ('R', 'S'):
                 st.caption('Sprint and Grand Prix replays follow the recorded race timeline. Positions are interpolated, leaderboard order is approximate, and Safety Car position is simulated.')
+                st.caption('A lap-time chart opens alongside the replay. Use the Insights menu for sector times, driver telemetry and tyre strategy. These views follow replay playback.')
             else:
                 st.caption('Practice and qualifying replays compare individual fastest laps. Select a driver in the replay window; qualifying also offers Q1, Q2 and Q3 segments.')
             replay_options = ['All drivers', 'Top three constructors', 'Choose drivers'] if season is not None else ['All drivers', 'Choose drivers']
