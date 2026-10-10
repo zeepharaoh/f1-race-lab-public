@@ -164,6 +164,7 @@ def race_render_context(monkeypatch):
     import championship_data
     import championship_overlays
     import replay_overlays
+    import replay_strategy
     laps = ReplayTestLaps({'Driver': ['AAA', 'BBB', 'AAA'], 'LapNumber': [1, 1, 2],
                            'Sector1Time': pd.to_timedelta([30, 31, 29], unit='s')})
     results = pd.DataFrame({'Abbreviation': ['AAA', 'BBB'], 'DriverNumber': ['1', '2'],
@@ -215,6 +216,9 @@ def race_render_context(monkeypatch):
     load_championship = Mock(return_value=snapshot)
     championship_hook = Mock(side_effect=lambda *args: nullcontext())
     gap_hook = Mock(side_effect=lambda *args: nullcontext())
+    strategy = object()
+    strategy_loader = Mock(return_value=strategy)
+    monkeypatch.setattr(replay_strategy.StrategyTimeline, 'from_session', strategy_loader)
     monkeypatch.setattr(championship_data, 'load_championship_snapshot', load_championship)
     monkeypatch.setattr(championship_overlays, 'install_championship_tables', championship_hook)
     monkeypatch.setattr(replay_overlays, 'install_replay_overlays', gap_hook)
@@ -223,7 +227,8 @@ def race_render_context(monkeypatch):
                            stream=stream, start_stream=start_stream, stream_factory=stream_factory,
                            interface=interface, render_control=render_control, lifecycle=lifecycle,
                            load_championship=load_championship, championship_hook=championship_hook,
-                           gap_hook=gap_hook, snapshot=snapshot)
+                           gap_hook=gap_hook, snapshot=snapshot, strategy=strategy,
+                           strategy_loader=strategy_loader)
 
 
 @pytest.mark.parametrize('session_code', ['R', 'S'])
@@ -255,7 +260,8 @@ def test_race_insights_publish_selected_laps_and_clean_up_on_close(race_render_c
     assert arguments['current_driver_standings'] == {'BBB': 30.0, 'AAA': 20.0}
     assert arguments['current_constructors_standings'] == {'B': 30.0, 'A': 20.0}
     context.championship_hook.assert_called_once_with(context.interface, context.snapshot)
-    context.gap_hook.assert_called_once_with(context.interface, context.data['frames'])
+    context.strategy_loader.assert_called_once_with(context.session, context.data)
+    context.gap_hook.assert_called_once_with(context.interface, context.data['frames'], context.strategy)
     pd.testing.assert_frame_equal(context.session.laps, original_laps)
     pd.testing.assert_frame_equal(context.session.results, original_results)
     assert context.session.drivers == original_drivers

@@ -207,6 +207,7 @@ def render_race(session, selected, data, title, speed, round_number, session_cod
     from championship_data import load_championship_snapshot
     from championship_overlays import install_championship_tables
     from replay_overlays import install_replay_overlays
+    from replay_strategy import StrategyTimeline
     from src.interfaces import race_replay as interface
     from src.run_session import run_arcade_replay
     lap = session.laps.pick_fastest()
@@ -220,6 +221,7 @@ def render_race(session, selected, data, title, speed, round_number, session_cod
         print('Circuit rotation unavailable; using recorded track coordinates.', flush=True)
     view = SessionView(session, session.laps[session.laps.Driver.isin(selected['Abbreviation'])], selected)
     championship = load_championship_snapshot(session, round_number, session_code)
+    strategy = StrategyTimeline.from_session(session, data)
     print(f'Championship: {championship["label"]}', flush=True)
     if championship['warning']:
         print(championship['warning'], flush=True)
@@ -242,7 +244,7 @@ def render_race(session, selected, data, title, speed, round_number, session_cod
     interface.TelemetryStreamServer = lambda: stream
     try:
         with install_championship_tables(interface, championship), install_replay_overlays(
-                interface, data.get('full_field_frames', data['frames'])):
+                interface, data.get('full_field_frames', data['frames']), strategy):
             run_arcade_replay(
                 frames=data['frames'], track_statuses=data['track_statuses'], example_lap=example,
                 drivers=selected['DriverNumber'].tolist(), title=title,

@@ -357,7 +357,7 @@ def app():
             if replay_code in ('R', 'S'):
                 st.caption('Sprint and Grand Prix replays follow the recorded race timeline. Positions are interpolated, leaderboard order is approximate, and Safety Car position is simulated.')
                 st.caption('The track replay opens in a desktop window. Click a leaderboard driver for its telemetry card; hold Shift while clicking to compare multiple drivers.')
-                st.caption('Press G for ahead/behind or leader gaps, C for the driver championship, and A for constructors. Championship tables show points before the selected session.')
+                st.caption('The leaderboard shows tyres and tyre age. Press P or click Stops for pit-stop counts and last stop laps. G switches gap mode; C and A show the pre-session driver and constructor championships.')
                 st.caption('A lap-time chart opens alongside the replay. Use the Insights menu for sector times, driver telemetry and tyre strategy. These views follow replay playback.')
             else:
                 st.caption('Practice and qualifying replays compare individual fastest laps. Select a driver in the replay window; qualifying also offers Q1, Q2 and Q3 segments.')

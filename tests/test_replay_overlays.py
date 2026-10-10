@@ -4,7 +4,7 @@ import sys
 import numpy as np
 import pytest
 
-from replay_overlays import Gap, GapTimeline, install_replay_overlays
+from replay_overlays import Gap, GapTimeline, install_replay_overlays, leaderboard_layout
 
 
 def test_gaps_use_same_point_crossings_with_changing_speed():
@@ -90,7 +90,7 @@ def test_adapter_restores_engine_methods_and_preserves_other_shortcuts(monkeypat
     original_init, original_key = Window.__init__, Window.on_key_press
     board = type('Board', (), {})
     interface = SimpleNamespace(LeaderboardComponent=board, F1RaceReplayWindow=Window)
-    monkeypatch.setitem(sys.modules, 'arcade', SimpleNamespace(key=SimpleNamespace(G=7)))
+    monkeypatch.setitem(sys.modules, 'arcade', SimpleNamespace(key=SimpleNamespace(G=7, P=8)))
     with pytest.raises(RuntimeError):
         with install_replay_overlays(interface, []):
             assert interface.LeaderboardComponent is not board
@@ -100,9 +100,108 @@ def test_adapter_restores_engine_methods_and_preserves_other_shortcuts(monkeypat
             assert window.leaderboard_show_gaps and not window.leaderboard_show_neighbor_gaps
             window.on_key_press(7, 0)
             assert not window.leaderboard_show_gaps and window.leaderboard_show_neighbor_gaps
+            window.on_key_press(8, 0)
+            assert window.leaderboard_show_pit_stops
+            window.on_key_press(7, 0)
+            assert window.leaderboard_show_gaps and window.leaderboard_show_pit_stops
+            window.on_key_press(8, 0)
+            assert not window.leaderboard_show_pit_stops and window.leaderboard_show_gaps
             window.on_key_press(1, 2)
             assert window.last_key == (1, 2)
             raise RuntimeError('renderer stopped')
     assert interface.LeaderboardComponent is board
     assert Window.__init__ is original_init
     assert Window.on_key_press is original_key
+
+
+def test_stops_button_does_not_change_gap_mode_or_driver_selection(monkeypatch):
+    class Board:
+        def __init__(self, **kwargs):
+            self.visible = True
+
+        def on_mouse_press(self, window, x, y, button, modifiers):
+            return 'driver selection'
+
+    class Window:
+        def __init__(self, **kwargs):
+            pass
+
+        def on_key_press(self, symbol, modifiers):
+            pass
+
+    monkeypatch.setitem(sys.modules, 'arcade', SimpleNamespace(key=SimpleNamespace(G=7, P=8)))
+    interface = SimpleNamespace(LeaderboardComponent=Board, F1RaceReplayWindow=Window)
+    with install_replay_overlays(interface, []):
+        board = interface.LeaderboardComponent()
+        board.stops_toggle_rect = (10, 20, 100, 40)
+        window = SimpleNamespace(leaderboard_show_gaps=True, selected_drivers=['AAA'])
+        assert board.on_mouse_press(window, 50, 30, 1, 0) is True
+        assert window.leaderboard_show_pit_stops and window.leaderboard_show_gaps
+        assert window.selected_drivers == ['AAA']
+        board.on_mouse_press(window, 50, 30, 1, 0)
+        assert not window.leaderboard_show_pit_stops
+        assert board.on_mouse_press(window, 50, 10, 1, 0) == 'driver selection'
+
+
+def test_every_row_keeps_tyres_when_gaps_are_hidden_and_stops_are_shown(monkeypatch):
+    drawn = []
+
+    class Text:
+        def __init__(self, text, x, y, color, size, **kwargs):
+            self.text, self.x, self.y, self.color = text, x, y, color
+            self.font_size = size
+
+        def draw(self):
+            drawn.append(self.text)
+
+    class Board:
+        def __init__(self, **kwargs):
+            self.width = kwargs['width']
+            self.x, self.row_height = 100, 25
+            self.visible = True
+            self.entries = [('AAA', (255, 0, 0), {'lap': 2, 'dist': 100}, 500),
+                            ('BBB', (0, 255, 0), {'lap': 2, 'dist': 200}, 400)]
+            self.show_gaps = False
+
+    class Window:
+        def __init__(self, **kwargs):
+            pass
+
+        def on_key_press(self, *args):
+            pass
+
+    colors = SimpleNamespace(WHITE=(255, 255, 255), BLACK=(0, 0, 0), LIGHT_GRAY=(200, 200, 200))
+    monkeypatch.setitem(sys.modules, 'arcade', SimpleNamespace(
+        key=SimpleNamespace(G=7, P=8), Text=Text, color=colors, XYWH=lambda *args: args,
+        draw_rect_filled=lambda *args: None, draw_circle_filled=lambda *args: None))
+    states = {'AAA': SimpleNamespace(compound='MEDIUM', in_pit=False,
+                                     tyre_label=lambda: 'MED 12L', stops_label=lambda: '1 · L10'),
+              'BBB': SimpleNamespace(compound='HARD', in_pit=True,
+                                     tyre_label=lambda: 'HARD 6L', stops_label=lambda: '0')}
+    strategy = SimpleNamespace(at=lambda code, seconds: states[code], warning='')
+    timeline = SimpleNamespace(times=[200], gaps=lambda index: {})
+    window = SimpleNamespace(height=900, frame_index=0, _gap_timeline=timeline,
+                             selected_drivers=['AAA'], leaderboard_show_neighbor_gaps=False,
+                             leaderboard_show_gaps=False, leaderboard_show_pit_stops=True)
+    interface = SimpleNamespace(LeaderboardComponent=Board, F1RaceReplayWindow=Window)
+    with install_replay_overlays(interface, [], strategy):
+        board = interface.LeaderboardComponent()
+        board.draw(window)
+        assert 'MED 12L' in drawn and 'HARD 6L' in drawn
+        assert '1 · L10' in drawn and 'PIT' in drawn
+        assert [rect[0] for rect in board.rects] == ['AAA', 'BBB']
+        assert board.rects[0][-1] < board.stops_toggle_rect[1]
+        drawn.clear()
+        window.leaderboard_show_pit_stops = False
+        board.draw(window)
+        assert 'MED 12L' in drawn and 'HARD 6L' in drawn
+        assert '1 · L10' not in drawn
+
+
+@pytest.mark.parametrize('height', [540, 720, 900, 1080])
+def test_full_field_layout_clears_banner_and_playback_controls(height):
+    layout = leaderboard_layout(height, 22)
+    assert layout.title_y + 12 < height - 70
+    bottom = layout.title_y - 56 - 22 * layout.row_height
+    assert bottom >= 160
+    assert layout.data_font * 4 / 3 + 4 <= layout.row_height + 1e-6

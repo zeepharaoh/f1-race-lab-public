@@ -88,6 +88,8 @@ Click a driver on the replay's leaderboard to show a telemetry card with speed, 
 
 The leaderboard shows gaps **Ahead** and **Behind** each driver. Press **G** to switch to **Leader** gaps, or use the **I / L** buttons above the leaderboard. These gaps use recorded car crossings; unavailable timing is shown as a dash, and lapped cars show a lap deficit. They refer to the full field even when only some drivers are selected for replay.
 
+Every row shows the current **Tyre** compound and its recorded age in completed laps. **SOFT / MED / HARD / INTER / WET** identify the five compounds. Press **P** or click **Stops** to show each driver's completed pit-visit count and last pit-entry lap. Tyres remain visible. Stops count on pit exit; entering the pits shows **PIT** beside the driver. The display follows pause, rewind and restart. Missing timing appears as a dash. Rows compact in shorter windows; enlarge the window for easier reading.
+
 Press **C** for the driver championship or **A** for the constructor championship. These tables show points **before the selected session**, including drivers outside the replay selection. A Grand Prix includes that weekend's published Sprint points. The tables keep their historical cutoff while playback runs; they do not project championship points from race positions. Missing data and saved snapshots are identified in the table. After adding Sprint points, ties keep the previous published order.
 
 A **Lap Time & Gap Evolution** chart and **F1 Insights** menu open alongside race and Sprint replays. Use the menu for **Sector Times**, **Driver Live Telemetry**, **Live Tyre Strategy** and race-control messages. The views follow replay playback, including pause and seek; they are recorded data, not a live race feed. They use the drivers selected for the replay. The Insights menu and its charts close when the replay closes.
@@ -106,6 +108,7 @@ Sprint and Grand Prix controls:
 | **Click a leaderboard driver** | Show that driver's telemetry card |
 | **Shift + click a leaderboard driver** | Add or remove a comparison card |
 | **G** | Switch between ahead/behind gaps and gap to the leader |
+| **P** or **Stops button** | Show or hide completed pit stops and last stop lap |
 | **C** | Toggle the driver championship table |
 | **A** | Toggle the constructor championship table |
 | **R** | Restart |
@@ -201,7 +204,8 @@ Dashboard-launched replay logs are saved to `outputs/replay.log`.
 | `weekend.py` | Weekend schedules, session timing and classifications |
 | `main.py` | Animated replay launcher |
 | `replay_insights.py` | Replay lap charts and telemetry tools |
-| `replay_overlays.py` | Leaderboard intervals and leader gaps |
+| `replay_overlays.py` | Leaderboard gaps, tyres and pit-stop controls |
+| `replay_strategy.py` | Recorded tyre ages and completed pit visits |
 | `championship_data.py` | Championship points before each replay session |
 | `championship_overlays.py` | Driver and constructor championship tables |
 | `season_analysis.py` | Static season charts |
@@ -228,6 +232,7 @@ The replay uses [IAmTomShaw/f1-race-replay](https://github.com/IAmTomShaw/f1-rac
 - Replay car positions are interpolated. Leaderboard order is approximate, especially on lap 1, and Safety Car position is simulated.
 - Telemetry-card gaps are estimates from car positions and a fixed reference speed. Detected DRS zones come from one example lap and may be absent when its telemetry has no active DRS samples.
 - Leaderboard gaps are approximate recorded crossing times, distinct from the telemetry-card gap estimates. They are replay measurements rather than an official live timing feed.
+- Leaderboard tyres use recorded lap and pit-exit timing; age means completed laps on that set, including prior use. Stop counts require a recorded pit entry followed by an exit. Initial pit-lane departures and red-flag tyre changes do not add stops. Timing alone cannot distinguish a drive-through from a serviced stop, so counts represent completed pit visits. Stop lap is the pit-entry lap.
 - Practice and qualifying replays compare fastest laps. Drivers' laps may have been recorded at different times and in different conditions.
 - Point reconciliation checks accounting totals; it does not validate interpolated race positions.
 
