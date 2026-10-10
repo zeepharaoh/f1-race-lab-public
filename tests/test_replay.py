@@ -32,6 +32,7 @@ def test_race_driver_filter_does_not_modify_cached_payload():
     assert set(filtered['frames'][0]['drivers']) == {'BBB'}
     assert set(data['frames'][0]['drivers']) == {'AAA', 'BBB'}
     assert filtered['driver_colors'] == {'BBB': 'blue'}
+    assert filtered['full_field_frames'] is data['frames']
 
 
 @pytest.mark.parametrize('session_code,segment', [('FP1', 'best_lap'), ('Q', 'Q1'), ('SQ', 'Q2')])
@@ -158,7 +159,11 @@ class ReplayTestLaps(pd.DataFrame):
 
 @pytest.fixture
 def race_render_context(monkeypatch):
+    from contextlib import nullcontext
     import subprocess
+    import championship_data
+    import championship_overlays
+    import replay_overlays
     laps = ReplayTestLaps({'Driver': ['AAA', 'BBB', 'AAA'], 'LapNumber': [1, 1, 2],
                            'Sector1Time': pd.to_timedelta([30, 31, 29], unit='s')})
     results = pd.DataFrame({'Abbreviation': ['AAA', 'BBB'], 'DriverNumber': ['1', '2'],
@@ -205,10 +210,20 @@ def race_render_context(monkeypatch):
     monkeypatch.setitem(sys.modules, 'src.interfaces', interfaces)
     monkeypatch.setitem(sys.modules, 'src.interfaces.race_replay', interface)
     engine = SimpleNamespace(get_circuit_rotation=Mock(return_value=0.0))
+    snapshot = {'drivers': {'BBB': 30.0, 'AAA': 20.0}, 'constructors': {'B': 30.0, 'A': 20.0},
+                'label': 'Before Sprint · through round 15', 'warning': ''}
+    load_championship = Mock(return_value=snapshot)
+    championship_hook = Mock(side_effect=lambda *args: nullcontext())
+    gap_hook = Mock(side_effect=lambda *args: nullcontext())
+    monkeypatch.setattr(championship_data, 'load_championship_snapshot', load_championship)
+    monkeypatch.setattr(championship_overlays, 'install_championship_tables', championship_hook)
+    monkeypatch.setattr(replay_overlays, 'install_replay_overlays', gap_hook)
     return SimpleNamespace(session=session, selected=selected, data=data, child=child,
                            start_child=start_child, run_replay=run_replay, engine=engine,
                            stream=stream, start_stream=start_stream, stream_factory=stream_factory,
-                           interface=interface, render_control=render_control, lifecycle=lifecycle)
+                           interface=interface, render_control=render_control, lifecycle=lifecycle,
+                           load_championship=load_championship, championship_hook=championship_hook,
+                           gap_hook=gap_hook, snapshot=snapshot)
 
 
 @pytest.mark.parametrize('session_code', ['R', 'S'])
@@ -236,6 +251,11 @@ def test_race_insights_publish_selected_laps_and_clean_up_on_close(race_render_c
     assert list(view.results.Abbreviation) == ['AAA']
     assert view.drivers == ['1']
     assert arguments['session_info']['session'] == session_code
+    context.load_championship.assert_called_once_with(context.session, 16, session_code)
+    assert arguments['current_driver_standings'] == {'BBB': 30.0, 'AAA': 20.0}
+    assert arguments['current_constructors_standings'] == {'B': 30.0, 'A': 20.0}
+    context.championship_hook.assert_called_once_with(context.interface, context.snapshot)
+    context.gap_hook.assert_called_once_with(context.interface, context.data['frames'])
     pd.testing.assert_frame_equal(context.session.laps, original_laps)
     pd.testing.assert_frame_equal(context.session.results, original_results)
     assert context.session.drivers == original_drivers

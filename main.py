@@ -46,6 +46,7 @@ def filter_replay_data(data, session_code, codes):
     """Filter replay data without changing the cache."""
     filtered = dict(data)
     if session_code in ('R', 'S'):
+        filtered['full_field_frames'] = data.get('frames', [])
         frames = []
         available = set()
         for frame in data.get('frames', []):
@@ -203,6 +204,9 @@ def main(argv=None):
 
 def render_race(session, selected, data, title, speed, round_number, session_code, engine_data):
     import requests
+    from championship_data import load_championship_snapshot
+    from championship_overlays import install_championship_tables
+    from replay_overlays import install_replay_overlays
     from src.interfaces import race_replay as interface
     from src.run_session import run_arcade_replay
     lap = session.laps.pick_fastest()
@@ -215,6 +219,10 @@ def render_race(session, selected, data, title, speed, round_number, session_cod
         rotation = 0.0
         print('Circuit rotation unavailable; using recorded track coordinates.', flush=True)
     view = SessionView(session, session.laps[session.laps.Driver.isin(selected['Abbreviation'])], selected)
+    championship = load_championship_snapshot(session, round_number, session_code)
+    print(f'Championship: {championship["label"]}', flush=True)
+    if championship['warning']:
+        print(championship['warning'], flush=True)
     insights = None
     server_type = interface.TelemetryStreamServer
     stream = server_type(port=0)
@@ -233,19 +241,23 @@ def render_race(session, selected, data, title, speed, round_number, session_cod
     stream.start = start_insights_stream
     interface.TelemetryStreamServer = lambda: stream
     try:
-        run_arcade_replay(
-            frames=data['frames'], track_statuses=data['track_statuses'], example_lap=example,
-            drivers=selected['DriverNumber'].tolist(), title=title,
-            playback_speed=speed, driver_colors=data['driver_colors'],
-            circuit_rotation=rotation, total_laps=data['total_laps'],
-            session=view, enable_telemetry=True,
-            race_control_messages=data.get('race_control_messages', []),
-            session_info={'event_name': session.event['EventName'], 'year': 2026,
-                          'round': round_number, 'country': session.event['Country'],
-                          'circuit_name': session.event['Location'],
-                          'date': str(session.date.date()), 'session': session_code,
-                          'total_laps': data['total_laps'],
-                          'circuit_length_m': float(example['Distance'].max())})
+        with install_championship_tables(interface, championship), install_replay_overlays(
+                interface, data.get('full_field_frames', data['frames'])):
+            run_arcade_replay(
+                frames=data['frames'], track_statuses=data['track_statuses'], example_lap=example,
+                drivers=selected['DriverNumber'].tolist(), title=title,
+                playback_speed=speed, driver_colors=data['driver_colors'],
+                circuit_rotation=rotation, total_laps=data['total_laps'],
+                session=view, enable_telemetry=True,
+                current_driver_standings=championship['drivers'],
+                current_constructors_standings=championship['constructors'],
+                race_control_messages=data.get('race_control_messages', []),
+                session_info={'event_name': session.event['EventName'], 'year': 2026,
+                              'round': round_number, 'country': session.event['Country'],
+                              'circuit_name': session.event['Location'],
+                              'date': str(session.date.date()), 'session': session_code,
+                              'total_laps': data['total_laps'],
+                              'circuit_length_m': float(example['Distance'].max())})
     finally:
         interface.TelemetryStreamServer = server_type
         stream.stop()
