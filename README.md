@@ -222,7 +222,7 @@ Environments, caches, logs and generated outputs are excluded from version contr
 
 Season results and standings come from the [Jolpica F1 API](https://api.jolpi.ca/ergast/f1/2026/). Weekend schedules, session timing, available classifications and position data come through [FastF1](https://docs.fastf1.dev/). Session classifications may be derived from timing data and can differ from subsequently amended official results.
 
-The replay uses [IAmTomShaw/f1-race-replay](https://github.com/IAmTomShaw/f1-race-replay), pinned for fresh installations at commit `efdb8a31900d64e3f269d66601ab9726b7dc5923`. Its README declares an MIT licence. Engine source and assets are downloaded during setup and excluded from this repository.
+The replay uses [f1-race-replay by Tom Shaw and contributors](https://github.com/IAmTomShaw/f1-race-replay), pinned for fresh installations at commit `efdb8a31900d64e3f269d66601ab9726b7dc5923`. Its README declares an MIT licence. Engine source and assets are downloaded during setup and excluded from this repository. See [Third-party notices](THIRD_PARTY_NOTICES.md) for attribution and licence scope.
 
 - Championship points include Grands Prix and Sprints. Driver points include every team represented during the season.
 - Grid-to-finish gain is starting grid position minus classified finishing position. Pit-lane starts have no gain value.
@@ -248,3 +248,15 @@ python -m pytest -q
 ```
 
 GitHub Actions runs the Python checks on pushes and pull requests.
+
+## License
+
+This project's original source code is licensed under the [MIT License](LICENSE). Third-party software, data, assets and trademarks retain their respective licences and rights. See [Third-party notices](THIRD_PARTY_NOTICES.md).
+
+## Disclaimer
+
+No copyright infringement intended. This is an unofficial fan project for educational and non-commercial purposes. It is not affiliated with, approved by or endorsed by the Formula 1 companies, the FIA, teams or drivers.
+
+Formula 1 and related trademarks are the property of their respective owners. Data is sourced from publicly accessible APIs through FastF1 and Jolpica and is used here for educational and non-commercial analysis.
+
+The MIT licence covers this project's code; it does not grant rights to third-party timing data, images, assets or trademarks. Public API access does not remove the rights of the data owners. Refer to the [Formula 1 guidelines](https://www.formula1.com/en/information/guidelines.4EOKE9RRqevL4niTK9kWyt) and each source's terms.
