@@ -24,7 +24,9 @@ def main():
         print('Dashboard already running:', URL)
         return
     process = subprocess.Popen([sys.executable, '-m', 'streamlit', 'run',
-                                str(ROOT / 'dashboard.py'), '--server.port', '8501'], cwd=ROOT)
+                                str(ROOT / 'dashboard.py'), '--server.port', '8501',
+                                '--server.address', 'localhost',
+                                '--browser.serverAddress', 'localhost'], cwd=ROOT)
     try:
         for _ in range(60):
             if process.poll() is not None:

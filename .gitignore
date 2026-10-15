@@ -10,3 +10,4 @@ resources/
 outputs/
 .DS_Store
 *.log
+.streamlit/secrets.toml

@@ -2,6 +2,28 @@
 
 A Python dashboard for the full 2026 Formula 1 season and each race weekend, with championship analysis, practice and qualifying timing, Sprint and Grand Prix results, and animated replays. Explore the full grid, compare the current top three constructors, or select individual teams and drivers.
 
+## Online dashboard
+
+A hosted dashboard opens in a browser with no installation. Choose a weekend and session, then click **Load session data**. Use **Lap analysis** for driver and tyre comparisons, and **Refresh now** to check newly published results.
+
+The online version includes session results, championship charts, comparisons, lap analysis and CSV downloads. Animated track replays require the desktop application. The online replay tab links to its installation instructions.
+
+## Host the dashboard
+
+Deploy the public repository with [Streamlit Community Cloud](https://share.streamlit.io/). Sign in and connect the GitHub account that owns the repository, then create an app with these settings:
+
+| Setting | Value |
+| --- | --- |
+| Repository | `zeepharaoh/f1-race-lab-public` |
+| Branch | `main` |
+| Main file | `online.py` |
+| Python version | `3.12` |
+| Visibility | Public |
+
+Choose an available app URL and deploy. Share the resulting address with viewers. Streamlit installs `requirements.txt` automatically; no secrets or replay engine installation are needed. The hosting account needs repository access; viewers of a public app do not need to install Python or clone the repository.
+
+The hosted server checks for published data every 15 minutes while a visitor has the dashboard open. Manual refresh requests are shared and limited to one per minute. Session caches hold at most 12 analyses. Cached data is temporary, so a server restart can require fresh downloads. A sleeping app can take time to wake. See the [hosting guide](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/deploy) and [app limits](https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app).
+
 ## Installation
 
 Requirements: Python 3.12 or later, Git, and internet access. The installation script and desktop launcher support macOS. Animated replays require a desktop graphics session.
@@ -200,6 +222,8 @@ Dashboard-launched replay logs are saved to `outputs/replay.log`.
 | `Open F1 Race Lab.command` | macOS desktop launcher |
 | `launch.py` | Dashboard server and browser launcher |
 | `dashboard.py` | Dashboard views and controls |
+| `online.py` | Hosted dashboard entrypoint |
+| `hosting.py` | Shared manual refresh limit |
 | `data.py` | Downloads, snapshots, calculations and lap filtering |
 | `weekend.py` | Weekend schedules, session timing and classifications |
 | `main.py` | Animated replay launcher |

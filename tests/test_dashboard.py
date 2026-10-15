@@ -182,3 +182,70 @@ def test_failed_refresh_preserves_loaded_session_with_warning(dashboard, monkeyp
     assert not app.exception
     assert any('last loaded timing' in warning.value for warning in app.warning)
     assert any('best_lap_seconds' in item.value.columns for item in app.dataframe)
+
+
+@pytest.fixture
+def hosted_dashboard(dashboard):
+    _, called = dashboard
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    entrypoint = Path(__file__).resolve().parents[1] / 'online.py'
+    app = AppTest.from_file(str(entrypoint), default_timeout=20).run()
+    assert not app.exception
+    return app, called
+
+
+def test_hosted_dashboard_excludes_desktop_processes_and_logs(hosted_dashboard, monkeypatch):
+    app, _ = hosted_dashboard
+    launched = []
+    monkeypatch.setattr('subprocess.Popen', lambda *args, **kwargs: launched.append(args))
+    app.run()
+    assert not app.exception
+    assert not launched
+    assert 'Open animated replay' not in [button.label for button in app.button]
+    assert 'Load session drivers' not in [button.label for button in app.button]
+    assert 'Replay log' not in [expander.label for expander in app.expander]
+    assert not app.code
+    assert any('desktop window' in info.value for info in app.info)
+
+
+@pytest.mark.parametrize('code', ['FP1', 'Q', 'S', 'R'])
+def test_hosted_dashboard_loads_weekend_sessions(hosted_dashboard, code):
+    app, called = hosted_dashboard
+    app.selectbox(key='weekend-session').set_value(code).run()
+    next(button for button in app.button if button.label == 'Load session data').click().run()
+    assert not app.exception
+    assert (2, code) in called
+    assert any(item.label == 'Download this data' for item in app.get('download_button'))
+
+
+def test_hosted_lap_analysis_and_reruns_remain_interactive(hosted_dashboard):
+    app, called = hosted_dashboard
+    app.selectbox(key='pace-session').set_value('FP1').run()
+    next(button for button in app.button if button.label == 'Load lap analysis').click().run()
+    assert not app.exception
+    assert (2, 'FP1') in called
+    assert 'RES' in next(control for control in app.multiselect if control.label == 'Drivers on lap charts').options
+    next(control for control in app.radio if control.label == 'Comparison scope').set_value('Choose teams').run()
+    next(control for control in app.multiselect if control.label == 'Teams').set_value(['Ferrari']).run()
+    assert not app.exception
+    assert set(next(control for control in app.multiselect if control.label == 'Drivers on lap charts').options) == {'HAM', 'LEC'}
+
+
+def test_hosted_refresh_reuses_cache_during_shared_cooldown(hosted_dashboard, monkeypatch):
+    app, _ = hosted_dashboard
+    loader = data.load_season
+    calls = []
+
+    def load(*args, **kwargs):
+        calls.append(True)
+        return loader(*args, **kwargs)
+
+    monkeypatch.setattr(data, 'load_season', load)
+    next(button for button in app.button if button.label == 'Refresh now').click().run()
+    assert not app.exception
+    assert len(calls) == 1
+    next(button for button in app.button if button.label == 'Refresh now').click().run()
+    assert not app.exception
+    assert len(calls) == 1
+    assert any('requested recently' in info.value for info in app.info)

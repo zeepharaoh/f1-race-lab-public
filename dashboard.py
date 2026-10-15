@@ -1,4 +1,4 @@
-"""Run with: python -m streamlit run dashboard.py"""
+"""Dashboard views and desktop replay controls."""
 from pathlib import Path
 import subprocess
 import sys
@@ -7,6 +7,8 @@ import plotly.express as px
 import streamlit as st
 from data import ROOT, COLORS, load_season, cumulative_points
 from weekend import load_weekend_schedule, eligible_sessions, load_session_analysis
+
+HOSTED = bool(globals().get('HOSTED', False))
 
 st.set_page_config(page_title='F1 Race Lab', page_icon='🏁', layout='wide')
 st.markdown('''<style>
@@ -24,9 +26,15 @@ def weekend_schedule():
     return load_weekend_schedule(2026, refresh=True)
 
 
-@st.cache_data(ttl=900, show_spinner='Loading session timing…')
+@st.cache_data(ttl=900, max_entries=12, show_spinner='Loading session timing…')
 def session_analysis(round_number, session_code):
     return load_session_analysis(2026, round_number, session_code, refresh=True)
+
+
+@st.cache_resource
+def hosted_refresh_gate():
+    from hosting import RefreshGate
+    return RefreshGate(interval=60)
 
 
 def chart(fig, key):
@@ -154,11 +162,15 @@ def app():
         st.subheader('2026 season')
         st.caption('Checks for published results every 15 minutes while open. Reopening also checks freshness.')
         if st.button('Refresh now', width='stretch'):
-            season_data.clear()
-            weekend_schedule.clear()
-            session_analysis.clear()
-            st.session_state.pop('replay_drivers', None)
-            st.rerun()
+            wait = hosted_refresh_gate().request() if HOSTED else 0
+            if wait:
+                st.info(f'A refresh was requested recently. Try again in {wait} seconds.')
+            else:
+                season_data.clear()
+                weekend_schedule.clear()
+                session_analysis.clear()
+                st.session_state.pop('replay_drivers', None)
+                st.rerun()
         scope_options = ['All teams', 'Top three constructors', 'Choose teams'] if season is not None else ['All teams', 'Choose teams']
         scope = st.radio('Comparison scope', scope_options)
         teams = sorted(results.team.unique()) if season is not None else sorted(COLORS)
@@ -350,7 +362,10 @@ def app():
                         st.info('No laps match the selected drivers and tyres.')
     with replay:
         st.subheader('Animated session replay')
-        if schedule.empty:
+        if HOSTED:
+            st.info('Animated track replays open in a desktop window. Use the local application for replays. All session results, championship charts and lap analysis are available here in your browser.')
+            st.link_button('Get the desktop application', 'https://github.com/zeepharaoh/f1-race-lab-public#installation')
+        elif schedule.empty:
             st.warning('The weekend schedule is unavailable. Use Refresh now to retry.')
         else:
             replay_round, replay_code, replay_started = choose_session(schedule, 'replay')
@@ -419,3 +434,4 @@ def app():
             export(results, 'all_race_and_sprint_results')
 
 app()
+st.caption('Unofficial fan project for educational and noncommercial analysis. This application is not affiliated with or endorsed by the Formula 1 companies. Formula 1 and related trademarks belong to their respective owners.')

@@ -16,4 +16,4 @@ if [ ! -x "$engine/.venv/bin/python" ]; then
   python3 -m venv "$engine/.venv"
   "$engine/.venv/bin/python" -m pip install -r "$engine/requirements.txt"
 fi
-printf 'Ready. Run: .venv/bin/python -m streamlit run dashboard.py\n'
+printf 'Ready. Run: .venv/bin/python launch.py\n'
