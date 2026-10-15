@@ -279,10 +279,10 @@ The replay uses [f1-race-replay by Tom Shaw and contributors](https://github.com
 - Local FastF1 clean laps require a recorded time, accurate and undeleted status, green track conditions throughout, and no pit entry or exit. OpenF1 has no equivalent accuracy flag; its separate cleaning rules and source coverage are shown with the online analysis.
 - Lap times are not adjusted for fuel, tyre age, traffic, weather or strategy.
 - Native replay car positions are interpolated. Leaderboard order is approximate, especially on lap 1, and Safety Car position is simulated. Browser replay uses recorded positions and timing order, hides missing position spans, and does not simulate a Safety Car.
-- Telemetry-card gaps are estimates from car positions and a fixed reference speed. Detected DRS zones come from one example lap and may be absent when its telemetry has no active DRS samples.
-- Leaderboard gaps are approximate recorded crossing times, distinct from the telemetry-card gap estimates. They are replay measurements rather than an official live timing feed.
-- Leaderboard tyres use recorded lap and pit-exit timing; age means completed laps on that set, including prior use. Stop counts require a recorded pit entry followed by an exit. Initial pit-lane departures and red-flag tyre changes do not add stops. Timing alone cannot distinguish a drive-through from a serviced stop, so counts represent completed pit visits. Stop lap is the pit-entry lap.
-- Practice and qualifying replays compare fastest laps. Drivers' laps may have been recorded at different times and in different conditions.
+- Native replay telemetry card gaps are estimates from car positions and a fixed reference speed. Detected DRS zones come from one example lap and may be absent when its telemetry has no active DRS samples.
+- Native replay leaderboard gaps are approximate recorded crossing times, distinct from the telemetry-card gap estimates. They are replay measurements rather than an official live timing feed.
+- Native replay leaderboard tyres use recorded lap and pit exit timing; age means completed laps on that set, including prior use. Stop counts require a recorded pit entry followed by an exit. Initial pit-lane departures and red-flag tyre changes do not add stops. Timing alone cannot distinguish a drive-through from a serviced stop, so counts represent completed pit visits. Stop lap is the pit-entry lap.
+- Native practice and qualifying replays compare fastest laps. Drivers' laps may have been recorded at different times and in different conditions.
 - Point reconciliation checks accounting totals; it does not validate interpolated race positions.
 
 When circuit rotation metadata is unavailable, the replay uses the recorded track coordinates.
