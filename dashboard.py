@@ -221,7 +221,9 @@ def app():
         cards[1].metric('Drivers with results', selected.driver_id.nunique())
         cards[2].metric('Championship points', f'{selected.points.sum():,.0f}')
         cards[3].metric('Grand Prix podiums', int(selected_gp.position.le(3).sum()))
-    sessions_tab, races, overview, teammates, pace, replay, sources = st.tabs(['Weekend sessions', 'Grand Prix results', 'Season overview', 'Teammates', 'Lap analysis', 'Animated replay', 'Sources'])
+    sessions_tab, races, overview, teammates, pace, replay, sources = st.tabs(
+        ['Weekend sessions', 'Grand Prix results', 'Season overview', 'Teammates', 'Lap analysis', 'Animated replay', 'Sources'],
+        default='Season overview' if HOSTED else None)
     with sessions_tab:
         st.subheader('Practice, qualifying and race sessions')
         if schedule.empty:
