@@ -371,3 +371,70 @@ def test_analysis_refresh_bypasses_session_schedule_lookup_for_current_api_path(
     assert loads == [{'refresh': True}]
     assert analysis['metadata']['session_utc'] == '2026-10-09T10:00:00+00:00'
     assert not fresh['active']
+
+
+def test_missing_completion_reports_both_http_source_failures(monkeypatch, caplog):
+    from fastf1 import _api
+    session = fake_session('R', ())
+    session.api_path = '/static/2026/example/race/'
+    codes = iter([403, 404])
+    calls = []
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        return SimpleNamespace(status_code=next(codes),
+                               headers={'Content-Type': 'text/html'}, content=b'Blocked')
+    monkeypatch.setattr(weekend.requests, 'get', get)
+    with pytest.raises(weekend.SessionUnavailableError,
+                       match='timing source is unavailable: HTTP 403; HTTP 404'):
+        weekend.require_session_complete(session)
+    assert [url for url, _ in calls] == [
+        base + session.api_path + 'SessionInfo.jsonStream'
+        for base in (_api.base_url, _api.base_url_mirror)]
+    assert all(kwargs == {'headers': _api.headers, 'timeout': (5, 10)}
+               for _, kwargs in calls)
+    assert 'HTTP 403' in caplog.text and 'HTTP 404' in caplog.text
+    assert 'text/html' in caplog.text
+    assert 'Blocked' not in caplog.text
+
+
+def test_reachable_primary_keeps_missing_completion_message(monkeypatch):
+    from fastf1 import _api
+    session = fake_session('R', ())
+    session.api_path = '/static/2026/example/race/'
+    calls = []
+    def get(url, **kwargs):
+        calls.append(url)
+        return SimpleNamespace(status_code=200, headers={}, content=b'Published metadata')
+    monkeypatch.setattr(weekend.requests, 'get', get)
+    with pytest.raises(weekend.SessionUnavailableError,
+                       match='Race completion status is not available yet'):
+        weekend.require_session_complete(session)
+    assert calls == [_api.base_url + session.api_path + 'SessionInfo.jsonStream']
+
+
+def test_source_request_failure_reports_type_without_connection_details(monkeypatch, caplog):
+    session = fake_session('R', ())
+    session.api_path = '/static/2026/example/race/'
+    calls = []
+    def get(url, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            raise weekend.requests.ConnectionError('Private connection details')
+        return SimpleNamespace(status_code=503, headers={}, content=b'')
+    monkeypatch.setattr(weekend.requests, 'get', get)
+    with pytest.raises(weekend.SessionUnavailableError,
+                       match='timing source is unavailable: ConnectionError; HTTP 503'):
+        weekend.require_session_complete(session)
+    assert len(calls) == 2
+    assert 'ConnectionError' in caplog.text
+    assert 'Private connection details' not in caplog.text
+
+
+def test_missing_api_path_does_not_probe_network(monkeypatch):
+    session = fake_session('R', ())
+    def forbidden(*args, **kwargs):
+        pytest.fail('A session without an API path must not make a request')
+    monkeypatch.setattr(weekend.requests, 'get', forbidden)
+    with pytest.raises(weekend.SessionUnavailableError,
+                       match='Race completion status is not available yet'):
+        weekend.require_session_complete(session)

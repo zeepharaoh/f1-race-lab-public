@@ -1,9 +1,11 @@
 """F1 weekend schedules and session analysis."""
 from contextlib import nullcontext
 from datetime import datetime, timezone
+import logging
 
 import pandas as pd
 import fastf1
+import requests
 from fastf1.exceptions import DataNotLoadedError, NoLapDataError
 
 from data import ROOT, clean_laps
@@ -117,6 +119,9 @@ def require_session_complete(session):
         statuses = None
     label = getattr(session, 'name', 'Session')
     if statuses is None or statuses.empty or 'Status' not in statuses:
+        failure = _timing_source_failure(session)
+        if failure:
+            raise SessionUnavailableError(f'{label} timing source is unavailable: {failure}. Try Refresh now later')
         raise SessionUnavailableError(f'{label} completion status is not available yet')
     available = statuses['Status'].dropna().astype(str)
     last_status = available.iloc[-1] if not available.empty else ''
@@ -124,6 +129,29 @@ def require_session_complete(session):
     if last_status not in terminal:
         raise SessionUnavailableError(f'{label} is not complete in the timing feed yet')
     return last_status
+
+
+def _timing_source_failure(session):
+    path = getattr(session, 'api_path', '')
+    if not isinstance(path, str) or not path.startswith('/static/'):
+        return None
+    from fastf1 import _api
+    outcomes = []
+    for base in (_api.base_url, _api.base_url_mirror):
+        url = base + path + 'SessionInfo.jsonStream'
+        try:
+            response = requests.get(url, headers=_api.headers, timeout=(5, 10))
+            outcome = f'HTTP {response.status_code}'
+            logging.getLogger(__name__).warning('Timing source %s: %s, content type %s, bytes %s',
+                                              url, outcome, response.headers.get('Content-Type'),
+                                              len(response.content))
+            if response.status_code == 200:
+                return None
+        except requests.RequestException as error:
+            outcome = type(error).__name__
+            logging.getLogger(__name__).warning('Timing source %s: %s', url, outcome)
+        outcomes.append(outcome)
+    return '; '.join(outcomes)
 
 
 def load_completed_session(session, *, telemetry=False, weather=False, messages=True, refresh=False):

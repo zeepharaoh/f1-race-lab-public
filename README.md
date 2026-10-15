@@ -6,7 +6,9 @@ A Python dashboard for the full 2026 Formula 1 season and each race weekend, wit
 
 Open [F1 Race Lab online](https://f1racelab.streamlit.app/) in a browser with no installation. Choose a weekend and session, then click **Load session data**. Use **Lap analysis** for driver and tyre comparisons, and **Refresh now** to check newly published results.
 
-The online version includes session results, championship charts, comparisons, lap analysis and CSV downloads. Animated track replays require the desktop application. The online replay tab links to its installation instructions.
+The online version includes published season results, championship charts, comparisons and CSV downloads. Detailed session timing and lap analysis depend on the timing provider accepting requests from the hosting service. A source access failure is reported separately from an unfinished session. The provider can reject cloud requests even when local requests work; affected timing remains unavailable rather than being estimated. See the [FastF1 source access discussion](https://github.com/theOehrly/Fast-F1/discussions/949).
+
+Animated track replays require the desktop application. The online replay tab links to its installation instructions.
 
 ## Host the dashboard
 

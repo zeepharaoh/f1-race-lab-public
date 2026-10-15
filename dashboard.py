@@ -363,7 +363,7 @@ def app():
     with replay:
         st.subheader('Animated session replay')
         if HOSTED:
-            st.info('Animated track replays open in a desktop window. Use the local application for replays. All session results, championship charts and lap analysis are available here in your browser.')
+            st.info('Animated track replays open in a desktop window. Use the local application for replays. Championship charts and race results are available in the other tabs. Session timing and lap analysis depend on source availability.')
             st.link_button('Get the desktop application', 'https://github.com/zeepharaoh/f1-race-lab-public#installation')
         elif schedule.empty:
             st.warning('The weekend schedule is unavailable. Use Refresh now to retry.')
