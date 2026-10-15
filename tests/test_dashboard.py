@@ -1,5 +1,7 @@
 """Weekend dashboard checks."""
+import json
 from pathlib import Path
+import re
 from types import SimpleNamespace
 
 import pandas as pd
@@ -185,8 +187,23 @@ def test_failed_refresh_preserves_loaded_session_with_warning(dashboard, monkeyp
 
 
 @pytest.fixture
-def hosted_dashboard(dashboard):
+def hosted_dashboard(dashboard, monkeypatch):
+    import openf1_data
+
     _, called = dashboard
+    local_analysis = weekend.load_session_analysis
+
+    def online_analysis(*args, **kwargs):
+        analysis = local_analysis(*args, **kwargs)
+        analysis['metadata'].update(source='OpenF1 historical timing',
+                                    quality_note='Historical timing quality note')
+        return analysis
+
+    def unavailable_local(*args, **kwargs):
+        pytest.fail('The hosted dashboard must use its online timing source')
+
+    monkeypatch.setattr(openf1_data, 'load_openf1_analysis', online_analysis)
+    monkeypatch.setattr(weekend, 'load_session_analysis', unavailable_local)
     st.cache_data.clear()
     st.cache_resource.clear()
     entrypoint = Path(__file__).resolve().parents[1] / 'online.py'
@@ -206,10 +223,10 @@ def test_hosted_dashboard_excludes_desktop_processes_and_logs(hosted_dashboard, 
     assert 'Load session drivers' not in [button.label for button in app.button]
     assert 'Replay log' not in [expander.label for expander in app.expander]
     assert not app.code
-    assert any('desktop window' in info.value for info in app.info)
+    assert 'Load browser replay' in [button.label for button in app.button]
 
 
-@pytest.mark.parametrize('code', ['FP1', 'Q', 'S', 'R'])
+@pytest.mark.parametrize('code', ['FP1', 'Q', 'SQ', 'S', 'R'])
 def test_hosted_dashboard_loads_weekend_sessions(hosted_dashboard, code):
     app, called = hosted_dashboard
     app.selectbox(key='weekend-session').set_value(code).run()
@@ -217,6 +234,8 @@ def test_hosted_dashboard_loads_weekend_sessions(hosted_dashboard, code):
     assert not app.exception
     assert (2, code) in called
     assert any(item.label == 'Download this data' for item in app.get('download_button'))
+    assert any('OpenF1 historical timing' in caption.value for caption in app.caption)
+    assert any('Historical timing quality note' in caption.value for caption in app.caption)
 
 
 def test_hosted_lap_analysis_and_reruns_remain_interactive(hosted_dashboard):
@@ -230,6 +249,62 @@ def test_hosted_lap_analysis_and_reruns_remain_interactive(hosted_dashboard):
     next(control for control in app.multiselect if control.label == 'Teams').set_value(['Ferrari']).run()
     assert not app.exception
     assert set(next(control for control in app.multiselect if control.label == 'Drivers on lap charts').options) == {'HAM', 'LEC'}
+
+
+@pytest.mark.parametrize('session_code, official_round, expected_points', [
+    ('R', 2, True), ('S', 2, False), ('R', 1, False),
+])
+def test_hosted_race_points_match_official_session_without_changing_classification(
+        hosted_dashboard, monkeypatch, session_code, official_round, expected_points):
+    import openf1_data
+
+    app, _ = hosted_dashboard
+    season = data.load_season(2026)
+    published = season['results'].copy()
+    published['round'] = official_round
+    official_before = published.copy(deep=True)
+    monkeypatch.setattr(data, 'load_season', lambda *args, **kwargs: {**season, 'results': published})
+    loader = openf1_data.load_openf1_analysis
+    originals = []
+
+    def missing_points(*args, **kwargs):
+        analysis = loader(*args, **kwargs)
+        analysis['results']['points'] = float('nan')
+        analysis['results']['grid'] = float('nan')
+        analysis['results'].loc[analysis['results'].code.eq('NOR'), 'position'] = 2
+        analysis['results'].loc[analysis['results'].code.eq('PIA'), 'position'] = 1
+        originals.append((analysis, analysis['results'].copy(deep=True)))
+        return analysis
+
+    monkeypatch.setattr(openf1_data, 'load_openf1_analysis', missing_points)
+    st.cache_data.clear()
+    app.run()
+    app.selectbox(key='weekend-session').set_value(session_code).run()
+    next(button for button in app.button if button.label == 'Load session data').click().run()
+    assert not app.exception
+    table = next(item.value for item in app.dataframe
+                 if {'status', 'points', 'lap_count'}.issubset(item.value.columns)).set_index('driver')
+    assert table.loc['NOR', 'position'] == 2
+    assert table.loc['PIA', 'position'] == 1
+    if expected_points:
+        for row in published.itertuples():
+            assert table.loc[row.code, 'points'] == row.points
+            assert table.loc[row.code, 'grid'] == row.grid
+        assert pd.isna(table.loc['RES', 'points'])
+        assert pd.isna(table.loc['RES', 'grid'])
+        assert any('published Jolpica race results' in item.value for item in app.caption)
+    else:
+        assert table.points.isna().all()
+        assert table.grid.isna().all()
+        assert not any('published Jolpica race results' in item.value for item in app.caption)
+    session_points_charts = [item for item in app.get('plotly_chart')
+        if json.loads(item.proto.spec).get('layout', {}).get('title', {}).get('text') == 'Session points']
+    assert bool(session_points_charts) is expected_points
+    assert app.session_state['loaded_session'][1]['results'].points.isna().all()
+    assert app.session_state['loaded_session'][1]['results'].grid.isna().all()
+    for analysis, before in originals:
+        pd.testing.assert_frame_equal(analysis['results'], before)
+    pd.testing.assert_frame_equal(published, official_before)
 
 
 def test_hosted_refresh_reuses_cache_during_shared_cooldown(hosted_dashboard, monkeypatch):
@@ -249,3 +324,136 @@ def test_hosted_refresh_reuses_cache_during_shared_cooldown(hosted_dashboard, mo
     assert not app.exception
     assert len(calls) == 1
     assert any('requested recently' in info.value for info in app.info)
+
+
+def test_hosted_session_refresh_bypasses_the_source_disk_cache(hosted_dashboard, monkeypatch):
+    import openf1_data
+
+    app, _ = hosted_dashboard
+    loader = openf1_data.load_openf1_analysis
+    refresh_requests = []
+
+    def load(*args, **kwargs):
+        refresh_requests.append(kwargs.get('refresh'))
+        return loader(*args, **kwargs)
+
+    monkeypatch.setattr(openf1_data, 'load_openf1_analysis', load)
+    app.selectbox(key='weekend-session').set_value('FP1').run()
+    next(button for button in app.button if button.label == 'Load session data').click().run()
+    next(button for button in app.button if button.label == 'Refresh now').click().run()
+    assert not app.exception
+    assert refresh_requests == [True, True]
+
+
+@pytest.fixture
+def hosted_replay(hosted_dashboard, monkeypatch):
+    import web_replay
+
+    app, _ = hosted_dashboard
+    calls = []
+
+    def load(year, round_number, code, *, refresh=False):
+        calls.append((year, round_number, code, refresh))
+        drivers = [dict(code=code, number=number, name=code, team=team, color='#ff0000')
+                   for number, (code, team) in enumerate([
+                       ('NOR', 'McLaren'), ('LEC', 'Ferrari'), ('RUS', 'Mercedes'),
+                       ('RES', 'McLaren')], 1)]
+        cars = {driver['code']: {field: [value, value] for field, value in {
+            'x': 1, 'y': 2, 'lap': 1, 'position': index, 'speed': 200, 'gear': 7,
+            'throttle': 100, 'brake': 0, 'drs': 0, 'compound': 'SOFT', 'age': 1,
+            'stops': 0, 'last_stop_lap': None, 'in_pit': False,
+            'ahead': None, 'behind': None, 'leader': None}.items()}
+            for index, driver in enumerate(drivers, 1)}
+        return dict(metadata=dict(event=f'Weekend {round_number}', location='Track',
+            session=weekend.SESSION_LABELS[code], year=year, round=round_number,
+            session_code=code, start_utc='2026-01-01T10:00:00+00:00',
+            source='OpenF1 recorded timing', source_url='https://api.openf1.org/v1/',
+            retrieved_utc='2026-01-01T12:00:00+00:00'), track={'x': [0, 1, 0], 'y': [0, 1, 1]},
+            drivers=drivers, times=[0, 60], cars=cars, weather=[], race_control=[], unavailable=[])
+
+    monkeypatch.setattr(web_replay, 'load_browser_replay', load)
+    return app, calls
+
+
+def replay_data(app):
+    frames = list(app.get('iframe'))
+    assert len(frames) == 1
+    assert frames[0].proto.alt == 'Animated session replay'
+    match = re.search(r'<script id="replay-data" type="application/json">(.*?)</script>',
+                      frames[0].proto.srcdoc, re.DOTALL)
+    assert match is not None
+    return json.loads(match.group(1))
+
+
+@pytest.mark.parametrize('code', ['FP1', 'Q', 'SQ', 'S', 'R'])
+def test_hosted_replay_embeds_selected_session_without_desktop_process(hosted_replay, monkeypatch, code):
+    app, calls = hosted_replay
+    launched = []
+    monkeypatch.setattr('subprocess.Popen', lambda *args, **kwargs: launched.append(args))
+    app.selectbox(key='browser-replay-session').set_value(code).run()
+    next(button for button in app.button if button.label == 'Load browser replay').click().run()
+    assert not app.exception
+    assert calls == [(2026, 2, code, False)]
+    payload = replay_data(app)
+    assert payload['metadata']['session_code'] == code
+    assert payload['metadata']['round'] == 2
+    assert payload['visible_codes'] == ['NOR', 'LEC', 'RUS', 'RES']
+    assert not launched
+
+
+def test_hosted_replay_scope_reruns_without_redownloading(hosted_replay):
+    app, calls = hosted_replay
+    next(button for button in app.button if button.label == 'Load browser replay').click().run()
+    next(control for control in app.radio if control.label == 'Comparison scope').set_value('Choose teams').run()
+    next(control for control in app.multiselect if control.label == 'Teams').set_value(['Ferrari']).run()
+    assert not app.exception
+    assert replay_data(app)['visible_codes'] == ['LEC']
+    assert calls == [(2026, 2, 'R', False)]
+    next(control for control in app.multiselect if control.label == 'Teams').set_value([]).run()
+    assert not app.exception
+    assert not app.get('iframe')
+    assert any('Choose at least one team' in item.value for item in app.info)
+
+
+def test_hosted_replay_never_shows_another_session_or_future_replay(hosted_replay):
+    app, calls = hosted_replay
+    next(button for button in app.button if button.label == 'Load browser replay').click().run()
+    assert replay_data(app)['metadata']['session_code'] == 'R'
+    app.selectbox(key='browser-replay-session').set_value('FP1').run()
+    assert not app.exception
+    assert not app.get('iframe')
+    app.selectbox(key='browser-replay-round').set_value(3).run()
+    assert not app.exception
+    assert next(button for button in app.button if button.label == 'Load browser replay').disabled
+    assert not app.get('iframe')
+    assert calls == [(2026, 2, 'R', False)]
+
+
+def test_hosted_refresh_discards_replay_then_downloads_again(hosted_replay):
+    app, calls = hosted_replay
+    next(button for button in app.button if button.label == 'Load browser replay').click().run()
+    assert app.get('iframe')
+    next(button for button in app.button if button.label == 'Refresh now').click().run()
+    assert not app.exception
+    assert not app.get('iframe')
+    next(button for button in app.button if button.label == 'Load browser replay').click().run()
+    assert not app.exception
+    assert replay_data(app)['metadata']['round'] == 2
+    assert calls == [(2026, 2, 'R', False), (2026, 2, 'R', True)]
+
+
+def test_hosted_replay_failure_is_visible_and_cannot_reuse_another_session(hosted_replay, monkeypatch):
+    import web_replay
+
+    app, _ = hosted_replay
+    next(button for button in app.button if button.label == 'Load browser replay').click().run()
+
+    def unavailable(*args, **kwargs):
+        raise web_replay.BrowserReplayUnavailable('Recorded positions are not published')
+
+    monkeypatch.setattr(web_replay, 'load_browser_replay', unavailable)
+    app.selectbox(key='browser-replay-session').set_value('FP1').run()
+    next(button for button in app.button if button.label == 'Load browser replay').click().run()
+    assert not app.exception
+    assert not app.get('iframe')
+    assert any('Recorded positions are not published' in item.value for item in app.warning)

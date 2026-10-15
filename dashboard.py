@@ -1,4 +1,4 @@
-"""Dashboard views and desktop replay controls."""
+"""F1 dashboard, session analysis and replay controls."""
 from pathlib import Path
 import subprocess
 import sys
@@ -28,7 +28,16 @@ def weekend_schedule():
 
 @st.cache_data(ttl=900, max_entries=12, show_spinner='Loading session timing…')
 def session_analysis(round_number, session_code):
+    if HOSTED:
+        from openf1_data import load_openf1_analysis
+        return load_openf1_analysis(2026, round_number, session_code, refresh=True)
     return load_session_analysis(2026, round_number, session_code, refresh=True)
+
+
+@st.cache_data(ttl=3600, max_entries=3, show_spinner='Preparing recorded positions and telemetry. First loads can take a few minutes…')
+def browser_replay(round_number, session_code, refresh=False):
+    from web_replay import load_browser_replay
+    return load_browser_replay(2026, round_number, session_code, refresh=refresh)
 
 
 @st.cache_resource
@@ -78,19 +87,33 @@ def choose_session(schedule, key):
     return int(selected_round), code, has_started
 
 
-def session_results(analysis, teams, scope):
+def session_results(analysis, teams, scope, season=None):
     results = analysis['results']
-    view = results if scope == 'All teams' else results[results.team.isin(teams)]
     metadata = analysis['metadata']
+    official_points = False
+    if season is not None and metadata['session_code'] in ('R', 'S') and results.points.isna().any():
+        kind = 'Grand Prix' if metadata['session_code'] == 'R' else 'Sprint'
+        official = season['results']
+        official = official[official['round'].eq(metadata['round']) & official['kind'].eq(kind)]
+        if not official.empty and not official.code.duplicated().any():
+            results = results.copy()
+            results['points'] = results.points.fillna(results.code.map(official.set_index('code').points))
+            results['grid'] = results.grid.fillna(results.code.map(official.set_index('code').grid))
+            official_points = results.points.notna().any()
+    view = results if scope == 'All teams' else results[results.team.isin(teams)]
     code = metadata['session_code']
     if view.empty:
         st.info('No session drivers match the comparison scope.')
         return
-    st.caption(f'FastF1 session data · loaded {metadata.get("loaded_utc", metadata["retrieved_utc"])[:16].replace("T", " ")} UTC')
+    st.caption(f'{metadata.get("source", "FastF1 session data")} · loaded {metadata.get("loaded_utc", metadata["retrieved_utc"])[:16].replace("T", " ")} UTC')
+    if metadata.get('quality_note'):
+        st.caption(metadata['quality_note'])
+    if official_points:
+        st.caption('Points and missing grid positions are matched to published Jolpica race results. OpenF1 supplies the session classification and lap timing.')
     if not metadata.get('deleted_laps_checked', True):
         st.warning('Some lap deletion statuses are unavailable. Unconfirmed laps are excluded from fastest-lap and pace comparisons.')
     if code in ('R', 'S'):
-        st.caption('Session classification from FastF1. Timing-derived results may differ from subsequently amended official standings.')
+        st.caption('Published session classification. Timing results may differ from subsequently amended official standings.')
         points = view.dropna(subset=['points'])
         if not points.empty:
             chart(px.bar(points.sort_values('position'), x='code', y='points', color='team',
@@ -169,6 +192,9 @@ def app():
                 season_data.clear()
                 weekend_schedule.clear()
                 session_analysis.clear()
+                browser_replay.clear()
+                st.session_state.pop('browser_replay', None)
+                st.session_state['replay_refresh_requested'] = True
                 st.session_state.pop('replay_drivers', None)
                 st.rerun()
         scope_options = ['All teams', 'Top three constructors', 'Choose teams'] if season is not None else ['All teams', 'Choose teams']
@@ -235,7 +261,7 @@ def app():
                     analysis = session_analysis(session_round, session_code)
                     st.session_state['loaded_session'] = ((session_round, session_code), analysis)
                 except Exception as error:
-                    st.warning(f'Session data is unavailable: {error}. Use Refresh now to check again after publication.')
+                    st.warning(f'Session data is unavailable: {error}')
             loaded_session = st.session_state.get('loaded_session')
             if loaded_session and loaded_session[0] == (session_round, session_code):
                 try:
@@ -244,7 +270,7 @@ def app():
                     st.session_state['loaded_session'] = loaded_session
                 except Exception:
                     st.warning('Session refresh is unavailable. Showing the last loaded timing and its original load time.')
-                session_results(loaded_session[1], teams, scope)
+                session_results(loaded_session[1], teams, scope, season)
             else:
                 st.caption('Load the session to inspect driver times, classifications and laps. First downloads can take several minutes.')
             with st.expander('Weekend timetable'):
@@ -319,7 +345,7 @@ def app():
                 export(head_to_head, 'teammate_comparison')
     with pace:
         st.subheader('Lap timing and tyre stints')
-        st.caption('Timed, accurate green-flag laps excluding pit entry, pit exit and deleted laps. Medians reflect fuel, tyres and traffic; they are not adjusted car performance.')
+        st.caption('Clean timed laps excluding pit laps, reported deletions and caution periods where source flags are available. Medians reflect fuel, tyres and traffic; they are not adjusted car performance.')
         if schedule.empty:
             st.warning('The weekend schedule is unavailable. Use Refresh now to retry.')
         else:
@@ -339,7 +365,9 @@ def app():
                 except Exception:
                     st.warning('Lap refresh is unavailable. Showing the last loaded timing.')
                 metadata = loaded[1]['metadata']
-                st.caption(f'FastF1 timing · loaded {metadata.get("loaded_utc", metadata["retrieved_utc"])[:16].replace("T", " ")} UTC')
+                st.caption(f'{metadata.get("source", "FastF1 timing")} · loaded {metadata.get("loaded_utc", metadata["retrieved_utc"])[:16].replace("T", " ")} UTC')
+                if metadata.get('quality_note'):
+                    st.caption(metadata['quality_note'])
                 laps = loaded[1]['clean_laps']
                 if scope != 'All teams':
                     laps = laps[laps.Team.isin(teams)]
@@ -365,8 +393,33 @@ def app():
     with replay:
         st.subheader('Animated session replay')
         if HOSTED:
-            st.info('Animated track replays open in a desktop window. Use the local application for replays. Championship charts and race results are available in the other tabs. Session timing and lap analysis depend on source availability.')
-            st.link_button('Get the desktop application', 'https://github.com/zeepharaoh/f1-race-lab-public#installation')
+            if schedule.empty:
+                st.warning('The weekend schedule is unavailable. Use Refresh now to retry.')
+            else:
+                replay_round, replay_code, replay_started = choose_session(schedule, 'browser-replay')
+                st.caption('Watch the recorded session in your browser. The first load downloads car positions and telemetry; later viewers reuse the prepared data.')
+                replay_key = (replay_round, replay_code)
+                if st.button('Load browser replay', disabled=not replay_started, type='primary'):
+                    try:
+                        refresh_replay = st.session_state.pop('replay_refresh_requested', False)
+                        payload = browser_replay(*replay_key, refresh=refresh_replay)
+                        st.session_state['browser_replay'] = (replay_key, payload)
+                    except Exception as error:
+                        st.warning(f'Replay could not be loaded: {error}')
+                loaded_replay = st.session_state.get('browser_replay')
+                if loaded_replay and loaded_replay[0] == replay_key:
+                    from replay_player import replay_html
+                    payload = loaded_replay[1]
+                    shown_teams = None if scope == 'All teams' else teams
+                    visible_drivers = [driver for driver in payload['drivers']
+                                       if shown_teams is None or driver['team'] in shown_teams]
+                    if visible_drivers:
+                        st.iframe(replay_html(payload, shown_teams), height='content', alt='Animated session replay')
+                        st.caption(f'{payload["metadata"].get("source", "OpenF1")} · recorded car positions · prepared {payload["metadata"]["retrieved_utc"][:16].replace("T", " ")} UTC')
+                        if payload.get('unavailable'):
+                            st.caption('Position data is unavailable for: ' + ', '.join(payload['unavailable']))
+                    else:
+                        st.info('No replay drivers match the comparison scope.')
         elif schedule.empty:
             st.warning('The weekend schedule is unavailable. Use Refresh now to retry.')
         else:
@@ -424,8 +477,9 @@ def app():
             st.caption('Space: pause • ← / →: seek • ↑ / ↓: playback speed • click a driver: telemetry')
     with sources:
         st.subheader('Sources and validation')
-        st.write('Championship results: Jolpica F1 API. Weekend schedule, session timing and replay: FastF1. Refresh checks run every 15 minutes while the app is open. Data appears after the upstream source publishes it.')
+        st.write('Championship results: Jolpica F1 API. Weekend schedule and local session analysis: FastF1. Online session analysis and browser replay: OpenF1 historical data. Refresh checks run every 15 minutes while the app is open. Completed sessions appear after the source publishes them.')
         st.markdown('[FastF1 session data and schedule](https://docs.fastf1.dev/)')
+        st.markdown('[OpenF1 timing, positions and telemetry](https://openf1.org/docs/)')
         st.caption('Session timing and classifications may be derived by FastF1. Championship point reconciliation below uses Grand Prix and Sprint results from Jolpica.')
         if season is not None:
             st.dataframe(season['reconciliation'], hide_index=True, width='stretch')

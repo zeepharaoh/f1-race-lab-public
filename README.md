@@ -4,11 +4,17 @@ A Python dashboard for the full 2026 Formula 1 season and each race weekend, wit
 
 ## Online dashboard
 
-Open [F1 Race Lab online](https://f1racelab.streamlit.app/) in a browser with no installation. It opens on **Season overview**. Use **Grand Prix results** and **Teammates** to compare races and drivers, and **Refresh now** to check newly published results. Where timing is available, choose a weekend and session under **Weekend sessions**, then click **Load session data**. **Lap analysis** provides driver and tyre comparisons for available timing.
+Open [F1 Race Lab online](https://f1racelab.streamlit.app/) in a browser with no installation or account. It opens on **Season overview**.
 
-The online version includes published season results, championship charts, comparisons and CSV downloads. Detailed session timing and lap analysis depend on the timing provider accepting requests from the hosting service. A source access failure is reported separately from an unfinished session. The provider can reject cloud requests even when local requests work; affected timing remains unavailable rather than being estimated. See the [FastF1 source access discussion](https://github.com/theOehrly/Fast-F1/discussions/949).
+1. Use **Weekend sessions** to choose a weekend and session, then click **Load session data**.
+2. Open **Lap analysis**, select the session and click **Load lap analysis**. Choose drivers and tyre compounds to compare.
+3. Open **Animated replay**, select the session and click **Load browser replay**. Playback runs directly in the page.
+4. Use **Grand Prix results**, **Season overview** and **Teammates** for race and championship comparisons.
+5. Click **Refresh now** after a session to check newly published data.
 
-Animated track replays require the desktop application. The online replay tab links to its installation instructions.
+Online timing and replay use [OpenF1 historical data](https://openf1.org/docs/), avoiding the direct timing feed that rejects requests from some cloud hosts. Practice, qualifying, Sprint qualifying, Sprint and Grand Prix sessions are supported after their results and recordings are published. This is recorded analysis rather than a live race feed. Missing source data stays visible as unavailable.
+
+Initial replay downloads can take several minutes. Prepared replays are shared between viewers and playback then runs in the browser. Your computer does not need to stay on for colleagues to use the app.
 
 ## Host the dashboard
 
@@ -24,11 +30,11 @@ Deploy the public repository with [Streamlit Community Cloud](https://share.stre
 
 Choose an available app URL and deploy. Share the resulting address with viewers. Streamlit installs `requirements.txt` automatically; no secrets or replay engine installation are needed. The hosting account needs repository access; viewers of a public app do not need to install Python or clone the repository.
 
-The hosted server checks for published data every 15 minutes while a visitor has the dashboard open. Manual refresh requests are shared and limited to one per minute. Session caches hold at most 12 analyses. Cached data is temporary, so a server restart can require fresh downloads. A sleeping app can take time to wake. See the [hosting guide](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/deploy) and [app limits](https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app).
+The hosted server checks for published data every 15 minutes while a visitor has the dashboard open. Manual refresh requests are shared and limited to one per minute. Session caches hold at most 12 analyses and replay caches hold three prepared payloads in memory. Source requests share a paced queue to respect the OpenF1 request limit. Cached data is temporary, so a server restart can require fresh downloads. A sleeping app can take time to wake. See the [hosting guide](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/deploy) and [app limits](https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app).
 
 ## Installation
 
-Requirements: Python 3.12 or later, Git, and internet access. The installation script and desktop launcher support macOS. Animated replays require a desktop graphics session.
+Requirements: Python 3.12 or later, Git, and internet access. The installation script and desktop launcher support macOS. The native replay requires a desktop graphics session; the browser replay does not.
 
 Clone or download the repository, open a terminal in the project folder, then run:
 
@@ -49,6 +55,8 @@ Double-click **Open F1 Race Lab.command** in the project folder, or run:
 The launcher opens the dashboard at **http://localhost:8501**. Keep its Terminal window running while using the app. If the dashboard is already running, the launcher opens the existing instance.
 
 Press **Control + C** in the Terminal window to stop the server. Closing the browser tab does not stop it. Close any replay window separately.
+
+To run the same browser replay version locally, use `.venv/bin/python -m streamlit run online.py` from the project folder.
 
 ## Race-weekend workflow
 
@@ -76,7 +84,7 @@ If a championship refresh fails, the dashboard can display its last complete sav
 | **Animated replay** | Weekend and session selection, drivers and playback controls |
 | **Sources** | Source links, retrieval times and championship point reconciliation |
 
-**Comparison scope** filters the analysis by **All teams**, **Top three constructors** or **Choose teams**. Replay driver selection is independent of this filter.
+**Comparison scope** filters the analysis by **All teams**, **Top three constructors** or **Choose teams**. It also selects which cars appear on the browser replay map. The timing tower retains the full field so gaps keep their original meaning. Native desktop replay driver selection is independent of this filter.
 
 **Download this data** exports the corresponding table as CSV. Charts also support PNG downloads.
 
@@ -103,6 +111,18 @@ In **Lap analysis**, select the weekend and session, click **Load lap analysis**
 Compare similar tyres and consider tyre age, fuel, traffic and weather. Median lap time describes the selected laps; it does not isolate car performance.
 
 ### Animated replay
+
+The online dashboard plays recorded sessions directly in the page. Select the weekend and session, then click **Load browser replay**.
+
+1. Click **Play** or **Pause**. Choose **Speed**, drag the timeline, or jump ten seconds forward and back.
+2. Click a driver in the timing tower to show their speed, gear, lap, throttle, brake and DRS status. Select up to three drivers to compare telemetry cards.
+3. Use **Gap display** to switch between gaps ahead and behind or the gap to the leader. Race gaps apply to Grand Prix and Sprint sessions.
+4. Each row shows tyre compound and age in completed laps. Click **Show pit stops** to see recorded pit visits and the lap of the most recent visit. Click **Show tyres** to switch back.
+5. Use **Driver labels** to reduce map clutter. **Restart** resets the recorded session clock.
+
+All session types follow their recorded chronological timeline in the browser, including practice and qualifying. The timing tower shows the source session order rather than cars ordered by their physical track position. Position samples are interpolated only across short recorded intervals; gaps in coverage hide the car. Missing or stale telemetry shows **N/A**. Pit counts are reported pit lane visits and can include a drive through; they do not prove a tyre change or stationary service.
+
+### Desktop replay
 
 In **Animated replay**, select a weekend and session, then choose **All drivers**, **Top three constructors** or **Choose drivers**. For **Choose drivers**, click **Load session drivers** first, then choose from **Replay drivers**. The roster includes the session's actual participants, including practice substitutes. Click **Open animated replay** when ready.
 
@@ -140,7 +160,7 @@ Sprint and Grand Prix controls:
 | **H** | Show keyboard help |
 | **Escape** | Close the replay window |
 
-Launch from the desktop launcher or a desktop terminal to use graphical replays. A headless server can display the dashboard but cannot open a replay window.
+Launch from the desktop launcher or a desktop terminal to use native graphical replays. The online browser replay works on a headless server.
 
 ## Editors
 
@@ -226,6 +246,9 @@ Dashboard-launched replay logs are saved to `outputs/replay.log`.
 | `dashboard.py` | Dashboard views and controls |
 | `online.py` | Hosted dashboard entrypoint |
 | `hosting.py` | Shared manual refresh limit |
+| `openf1_data.py` | Hosted session timing, source cache and lap normalization |
+| `web_replay.py` | Recorded positions, timing and telemetry for browser playback |
+| `replay_player.py`, `replay_player.html`, `replay_player.js` | Browser replay player and controls |
 | `data.py` | Downloads, snapshots, calculations and lap filtering |
 | `weekend.py` | Weekend schedules, session timing and classifications |
 | `main.py` | Animated replay launcher |
@@ -246,16 +269,16 @@ Environments, caches, logs and generated outputs are excluded from version contr
 
 ## Data sources and interpretation
 
-Season results and standings come from the [Jolpica F1 API](https://api.jolpi.ca/ergast/f1/2026/). Weekend schedules, session timing, available classifications and position data come through [FastF1](https://docs.fastf1.dev/). Session classifications may be derived from timing data and can differ from subsequently amended official results.
+Season results and standings come from the [Jolpica F1 API](https://api.jolpi.ca/ergast/f1/2026/). Weekend schedules and local session analysis come through [FastF1](https://docs.fastf1.dev/). Online session analysis and browser replay use [OpenF1](https://openf1.org/docs/). Session classifications can differ from subsequently amended official results.
 
 The replay uses [f1-race-replay by Tom Shaw and contributors](https://github.com/IAmTomShaw/f1-race-replay), pinned for fresh installations at commit `efdb8a31900d64e3f269d66601ab9726b7dc5923`. Its README declares an MIT licence. Engine source and assets are downloaded during setup and excluded from this repository. See [Third-party notices](THIRD_PARTY_NOTICES.md) for attribution and licence scope.
 
 - Championship points include Grands Prix and Sprints. Driver points include every team represented during the season.
 - Grid-to-finish gain is starting grid position minus classified finishing position. Pit-lane starts have no gain value.
 - Classified finishing positions can include retirements and do not measure pace directly.
-- Clean laps require a recorded time, accurate and undeleted status, green track conditions throughout, and no pit entry or exit.
+- Local FastF1 clean laps require a recorded time, accurate and undeleted status, green track conditions throughout, and no pit entry or exit. OpenF1 has no equivalent accuracy flag; its separate cleaning rules and source coverage are shown with the online analysis.
 - Lap times are not adjusted for fuel, tyre age, traffic, weather or strategy.
-- Replay car positions are interpolated. Leaderboard order is approximate, especially on lap 1, and Safety Car position is simulated.
+- Native replay car positions are interpolated. Leaderboard order is approximate, especially on lap 1, and Safety Car position is simulated. Browser replay uses recorded positions and timing order, hides missing position spans, and does not simulate a Safety Car.
 - Telemetry-card gaps are estimates from car positions and a fixed reference speed. Detected DRS zones come from one example lap and may be absent when its telemetry has no active DRS samples.
 - Leaderboard gaps are approximate recorded crossing times, distinct from the telemetry-card gap estimates. They are replay measurements rather than an official live timing feed.
 - Leaderboard tyres use recorded lap and pit-exit timing; age means completed laps on that set, including prior use. Stop counts require a recorded pit entry followed by an exit. Initial pit-lane departures and red-flag tyre changes do not add stops. Timing alone cannot distinguish a drive-through from a serviced stop, so counts represent completed pit visits. Stop lap is the pit-entry lap.
@@ -283,6 +306,6 @@ This project's original source code is licensed under the [MIT License](LICENSE)
 
 No copyright infringement intended. This is an unofficial fan project for educational and non-commercial purposes. It is not affiliated with, approved by or endorsed by the Formula 1 companies, the FIA, teams or drivers.
 
-Formula 1 and related trademarks are the property of their respective owners. Data is sourced from publicly accessible APIs through FastF1 and Jolpica and is used here for educational and non-commercial analysis.
+Formula 1 and related trademarks are the property of their respective owners. Data is sourced from publicly accessible APIs through FastF1, OpenF1 and Jolpica and is used here for educational and noncommercial analysis.
 
 The MIT licence covers this project's code; it does not grant rights to third-party timing data, images, assets or trademarks. Public API access does not remove the rights of the data owners. Refer to the [Formula 1 guidelines](https://www.formula1.com/en/information/guidelines.4EOKE9RRqevL4niTK9kWyt) and each source's terms.
