@@ -12,9 +12,11 @@ Open [F1 Race Lab online](https://f1racelab.streamlit.app/) in a browser with no
 4. Use **Grand Prix results**, **Season overview** and **Teammates** for race and championship comparisons.
 5. Click **Refresh now** after a session to check newly published data.
 
-Online timing and replay use [OpenF1 historical data](https://openf1.org/docs/), avoiding the direct timing feed that rejects requests from some cloud hosts. Practice, qualifying, Sprint qualifying, Sprint and Grand Prix sessions are supported after their results and recordings are published. This is recorded analysis rather than a live race feed. Missing source data stays visible as unavailable.
+Online timing and replay first use the free [TracingInsights session archive](https://github.com/TracingInsights/2026), published as JSON with no account or API key. Archived sessions remain available while another F1 session is live. Practice, qualifying, Sprint qualifying, Sprint and Grand Prix sessions are supported when the publisher has added them. The publisher typically updates about 30 minutes after a session finishes; this is a target, not a guarantee.
 
-OpenF1 can return **401** during a live session and restrict all unauthenticated requests, including requests for older sessions. Previously saved completed session timing and replays remain available when present, with a warning and their original source retrieval time. A session that has not been saved must wait until access resumes. Championship results use Jolpica and are independent of this restriction.
+Each load uses one published archive version. **Refresh now** checks for a newer version. Lap analysis retains accuracy and deletion flags, tyres, pit times and sector times. Official classifications are matched from Jolpica where available. Missing classifications and telemetry remain visible as unavailable.
+
+[OpenF1 historical data](https://openf1.org/docs/) is a backup when the archive is missing or unavailable. OpenF1 can restrict all public downloads during a live session, including older races. Saved sessions can still be shown with their original source dates. If neither source has usable data, the app explains this and you can retry after publication. This app plays recorded sessions and does not provide live timing.
 
 Initial replay downloads can take several minutes. Prepared replays are shared between viewers and playback then runs in the browser. Your computer does not need to stay on for colleagues to use the app.
 
@@ -30,13 +32,13 @@ Deploy the public repository with [Streamlit Community Cloud](https://share.stre
 | Python version | `3.12` |
 | Visibility | Public |
 
-Choose an available app URL and deploy. Share the resulting address with viewers. Streamlit installs `requirements.txt` automatically; the public historical API does not normally require credentials, and no replay engine installation is needed. The hosting account needs repository access; viewers of a public app do not need to install Python or clone the repository.
+Choose an available app URL and deploy. Share the resulting address with viewers. Streamlit installs `requirements.txt` automatically. The primary archive needs no credentials or replay engine installation. The hosting account needs repository access; viewers of a public app do not need to install Python or clone the repository.
 
-The hosted server checks for published data every 15 minutes while a visitor has the dashboard open. Manual refresh requests are shared and limited to one per minute. Session caches hold at most 12 analyses and replay caches hold three prepared payloads in memory. Source requests share a paced queue to respect the OpenF1 request limit. Cached data is temporary, so a server restart can require fresh downloads. A sleeping app can take time to wake. See the [hosting guide](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/deploy) and [app limits](https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app).
+The hosted server checks for published data every 15 minutes while a visitor has the dashboard open. Manual refresh requests are shared and limited to one per minute. Session caches hold at most 12 analyses and replay caches hold three prepared payloads in memory. Archive downloads use at most four parallel requests. OpenF1 backup requests share a paced queue to respect its request limit. Prepared replays are reused while their published archive version is unchanged, including after manual refresh. Cached data is temporary, so a server restart can require fresh downloads. A sleeping app can take time to wake. See the [hosting guide](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/deploy) and [app limits](https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app).
 
 ### Optional OpenF1 authentication
 
-The app owner can configure a valid OpenF1 access token through the server environment variable `OPENF1_ACCESS_TOKEN`. The server sends it as a Bearer token to OpenF1. Keep it in the hosting platform's secret settings or a private environment, never in source files or Git. Viewers do not enter credentials.
+The app owner can configure a valid OpenF1 access token through the server environment variable `OPENF1_ACCESS_TOKEN`. The server sends it as a Bearer token to the OpenF1 backup. The primary TracingInsights archive does not use it. Keep it in the hosting platform's secret settings or a private environment, never in source files or Git. Viewers do not enter credentials.
 
 Authentication requires access granted by OpenF1. This project does not include a subscription or create one. OpenF1 access tokens expire after one hour; this app does not renew them. An invalid or expired token still produces an access message. See the [OpenF1 authentication guide](https://openf1.org/auth.html). Without a token, historical downloads work when OpenF1 allows public access. See the [OpenF1 access policy](https://openf1.org/).
 
@@ -128,7 +130,11 @@ The online dashboard plays recorded sessions directly in the page. Select the we
 4. Each row shows tyre compound and age in completed laps. Click **Show pit stops** to see recorded pit visits and the lap of the most recent visit. Click **Show tyres** to switch back.
 5. Use **Driver labels** to reduce map clutter. **Restart** resets the recorded session clock.
 
-All session types follow their recorded chronological timeline in the browser, including practice and qualifying. The timing tower shows the source session order rather than cars ordered by their physical track position. Position samples are interpolated only across short recorded intervals; gaps in coverage hide the car. Missing or stale telemetry shows **N/A**. Pit counts are reported pit lane visits and can include a drive through; they do not prove a tyre change or stationary service.
+All session types follow their recorded chronological timeline in the browser, including practice and qualifying. The source and archive publication date appear above the replay. A full race can require more than a thousand small lap files on its first load; requests are limited to four at once and recordings are reduced before playback to keep memory bounded.
+
+With TracingInsights, the timing tower uses the last recorded lap checkpoint position. Practice and qualifying order may be unavailable. Continuous race gaps are unavailable and show **N/A**. The OpenF1 backup can provide more frequent session positions and race intervals when accessible. Source definitions appear inside the player.
+
+Archived coordinates come from FastF1 lap telemetry and already include interpolation. The player fills only short recorded intervals; missing lap recordings leave cars hidden during those spans. It never repeats a different lap to replace one that is missing. Tyres and completed pit visits follow recorded lap, pit entry and pit exit times. A pit visit can include a drive through and does not prove stationary service or a tyre change. Missing telemetry shows **N/A**.
 
 ### Desktop replay
 
@@ -241,7 +247,9 @@ Replay supports published 2026 sessions. `--session` accepts `FP1`, `FP2`, `FP3`
 | `Replay environment missing` | Check the engine folder, then run `sh setup.sh`. |
 | Replay cannot find a display | Start the app from a desktop terminal or launcher. |
 | Driver cards are missing | Click a driver on the replay leaderboard. Hold Shift and click others to compare; enlarge the window for more cards. |
-| OpenF1 access is restricted or returns 401 | Retry after the live session access window ends. Saved data is shown when available. The app owner may configure valid OpenF1 access on the server. Refreshing repeatedly does not remove the restriction. |
+| Direct FastF1 timing returns 403 | Run the browser version locally with `.venv/bin/python -m streamlit run online.py` to use the free published archive. |
+| Session archive is unavailable | New sessions must be published first. Click **Refresh now** later. The app tries the OpenF1 backup and can retain a saved replay. |
+| OpenF1 backup returns 401 | The backup is restricted during a live session. The primary archive does not share this restriction. If the archive has not published the selected session, retry after publication. |
 | Lap chart is empty | Click **Load lap analysis** and select drivers and tyres with available clean laps. |
 
 Dashboard-launched replay logs are saved to `outputs/replay.log`.
@@ -255,7 +263,11 @@ Dashboard-launched replay logs are saved to `outputs/replay.log`.
 | `dashboard.py` | Dashboard views and controls |
 | `online.py` | Hosted dashboard entrypoint |
 | `hosting.py` | Shared manual refresh limit |
-| `openf1_data.py` | Hosted session timing, source cache and lap normalization |
+| `hosted_data.py` | Primary archive selection, OpenF1 backup and official classification matching |
+| `archive_source.py` | Public archive version lookup, bounded downloads and metadata cache |
+| `archive_analysis.py` | Published lap normalization and clean pace comparisons |
+| `archive_replay.py` | Recorded lap telemetry, browser replay and prepared cache |
+| `openf1_data.py` | Backup session timing, source cache and lap normalization |
 | `web_replay.py` | Recorded positions, timing and telemetry for browser playback |
 | `replay_player.py`, `replay_player.html`, `replay_player.js` | Browser replay player and controls |
 | `data.py` | Downloads, snapshots, calculations and lap filtering |
@@ -278,7 +290,7 @@ Environments, caches, logs and generated outputs are excluded from version contr
 
 ## Data sources and interpretation
 
-Season results and standings come from the [Jolpica F1 API](https://api.jolpi.ca/ergast/f1/2026/). Weekend schedules and local session analysis come through [FastF1](https://docs.fastf1.dev/). Online session analysis and browser replay use [OpenF1](https://openf1.org/docs/). Session classifications can differ from subsequently amended official results.
+Season results and standings come from the [Jolpica F1 API](https://api.jolpi.ca/ergast/f1/2026/). Weekend schedules and local session analysis come through [FastF1](https://docs.fastf1.dev/). Online session analysis and browser replay primarily use the [TracingInsights public archive](https://github.com/TracingInsights/2026), processed from FastF1 and other timing sources. [OpenF1](https://openf1.org/docs/) supplies a backup. Archive versions, publication times and retrieval times are retained. The archive is distributed under Apache 2.0; see its [licence copy](licenses/TracingInsights-APACHE-2.0.txt) and [third party notices](THIRD_PARTY_NOTICES.md). Session classifications can differ from subsequently amended official results.
 
 The replay uses [f1-race-replay by Tom Shaw and contributors](https://github.com/IAmTomShaw/f1-race-replay), pinned for fresh installations at commit `efdb8a31900d64e3f269d66601ab9726b7dc5923`. Its README declares an MIT licence. Engine source and assets are downloaded during setup and excluded from this repository. See [Third-party notices](THIRD_PARTY_NOTICES.md) for attribution and licence scope.
 
@@ -287,7 +299,7 @@ The replay uses [f1-race-replay by Tom Shaw and contributors](https://github.com
 - Classified finishing positions can include retirements and do not measure pace directly.
 - Local FastF1 clean laps require a recorded time, accurate and undeleted status, green track conditions throughout, and no pit entry or exit. OpenF1 has no equivalent accuracy flag; its separate cleaning rules and source coverage are shown with the online analysis.
 - Lap times are not adjusted for fuel, tyre age, traffic, weather or strategy.
-- Native replay car positions are interpolated. Leaderboard order is approximate, especially on lap 1, and Safety Car position is simulated. Browser replay uses recorded positions and timing order, hides missing position spans, and does not simulate a Safety Car.
+- Native replay car positions are interpolated. Leaderboard order is approximate, especially on lap 1, and Safety Car position is simulated. Browser replay uses recorded positions, hides missing position spans, and does not simulate a Safety Car. Archive timing order uses lap checkpoints; the OpenF1 backup uses its position feed.
 - Native replay telemetry card gaps are estimates from car positions and a fixed reference speed. Detected DRS zones come from one example lap and may be absent when its telemetry has no active DRS samples.
 - Native replay leaderboard gaps are approximate recorded crossing times, distinct from the telemetry-card gap estimates. They are replay measurements rather than an official live timing feed.
 - Native replay leaderboard tyres use recorded lap and pit exit timing; age means completed laps on that set, including prior use. Stop counts require a recorded pit entry followed by an exit. Initial pit-lane departures and red-flag tyre changes do not add stops. Timing alone cannot distinguish a drive-through from a serviced stop, so counts represent completed pit visits. Stop lap is the pit-entry lap.
@@ -315,6 +327,6 @@ This project's original source code is licensed under the [MIT License](LICENSE)
 
 No copyright infringement intended. This is an unofficial fan project for educational and non-commercial purposes. It is not affiliated with, approved by or endorsed by the Formula 1 companies, the FIA, teams or drivers.
 
-Formula 1 and related trademarks are the property of their respective owners. Data is sourced from publicly accessible APIs through FastF1, OpenF1 and Jolpica and is used here for educational and noncommercial analysis.
+Formula 1 and related trademarks are the property of their respective owners. Data is sourced from publicly accessible APIs through TracingInsights, FastF1, OpenF1 and Jolpica and is used here for educational and noncommercial analysis.
 
 The MIT licence covers this project's code; it does not grant rights to third-party timing data, images, assets or trademarks. Public API access does not remove the rights of the data owners. Refer to the [Formula 1 guidelines](https://www.formula1.com/en/information/guidelines.4EOKE9RRqevL4niTK9kWyt) and each source's terms.

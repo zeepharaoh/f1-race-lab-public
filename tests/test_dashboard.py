@@ -188,6 +188,15 @@ def test_failed_refresh_preserves_loaded_session_with_warning(dashboard, monkeyp
 
 @pytest.fixture
 def hosted_dashboard(dashboard, monkeypatch):
+    import archive_analysis
+    import archive_replay
+    from archive_source import ArchiveUnavailableError
+
+    def no_archive(*args, **kwargs):
+        raise ArchiveUnavailableError('not_published')
+
+    monkeypatch.setattr(archive_analysis, 'load_archive_analysis', no_archive)
+    monkeypatch.setattr(archive_replay, 'load_archive_replay', no_archive)
     import openf1_data
 
     _, called = dashboard
@@ -456,7 +465,7 @@ def test_hosted_replay_failure_is_visible_and_cannot_reuse_another_session(hoste
     next(button for button in app.button if button.label == 'Load browser replay').click().run()
     assert not app.exception
     assert not app.get('iframe')
-    assert any('Recorded positions are not published' in item.value for item in app.warning)
+    assert any('Neither source has usable recorded data' in item.value for item in app.warning)
 
 
 def limited_source_metadata():
@@ -574,8 +583,38 @@ def test_hosted_uncached_access_failure_is_friendly_and_does_not_show_saved_data
     assert 'https://api.openf1.org' not in warnings
     assert 'secret_value' not in warnings
     assert 'access_token=' not in warnings
-    assert 'not published' not in warnings.lower()
+    assert 'free archive has not published' in warnings.lower()
+    assert 'OpenF1 temporarily restricts' in warnings
     assert 'saved data' not in warnings.lower()
     assert not app.get('iframe')
     assert not any('best_lap_seconds' in item.value.columns for item in app.dataframe)
     assert not any(control.label == 'Drivers on lap charts' for control in app.multiselect)
+
+
+@pytest.mark.parametrize('session_code', ['FP1', 'R'])
+def test_hosted_archive_source_dates_and_classification_are_honest(hosted_dashboard, monkeypatch, session_code):
+    import archive_analysis
+    import openf1_data
+    app, _ = hosted_dashboard
+    fixture_analysis = openf1_data.load_openf1_analysis
+    def archive(*args, **kwargs):
+        result = fixture_analysis(*args, **kwargs)
+        result['metadata'].update(archived=True, source='TracingInsights / FastF1 archive',
+            archive_revision='2026.297.2', published_utc='2026-10-24T19:00:38+00:00',
+            classification_available=session_code.startswith('FP'))
+        if session_code == 'R':
+            result['results']['position'] = float('nan')
+        return result
+    def forbidden(*args, **kwargs):
+        raise AssertionError('The archive is available and must not call OpenF1')
+    monkeypatch.setattr(archive_analysis, 'load_archive_analysis', archive)
+    monkeypatch.setattr(openf1_data, 'load_openf1_analysis', forbidden)
+    st.cache_data.clear()
+    app.selectbox(key='weekend-session').set_value(session_code).run()
+    next(button for button in app.button if button.label == 'Load session data').click().run()
+    assert not app.exception
+    assert any('TracingInsights / FastF1 archive' in item.value for item in app.caption)
+    assert any('Archive release 2026.297.2 published 2026-10-24 19:00 UTC' in item.value for item in app.caption)
+    if session_code == 'R':
+        assert any('Official classification is not available' in item.value for item in app.info)
+        assert not any(item.value.startswith('Published session classification.') for item in app.caption)

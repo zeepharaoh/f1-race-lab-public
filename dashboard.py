@@ -29,15 +29,15 @@ def weekend_schedule():
 @st.cache_data(ttl=900, max_entries=12, show_spinner='Loading session timing…')
 def session_analysis(round_number, session_code):
     if HOSTED:
-        from openf1_data import load_openf1_analysis
-        return load_openf1_analysis(2026, round_number, session_code, refresh=True)
+        from hosted_data import load_hosted_analysis
+        return load_hosted_analysis(2026, round_number, session_code, refresh=True)
     return load_session_analysis(2026, round_number, session_code, refresh=True)
 
 
-@st.cache_data(ttl=3600, max_entries=3, show_spinner='Preparing recorded positions and telemetry. First loads can take a few minutes…')
+@st.cache_data(ttl=3600, max_entries=3, show_spinner='Preparing recorded positions and telemetry. A full race can take several minutes on its first load…')
 def browser_replay(round_number, session_code, refresh=False):
-    from web_replay import load_browser_replay
-    return load_browser_replay(2026, round_number, session_code, refresh=refresh)
+    from hosted_data import load_hosted_replay
+    return load_hosted_replay(2026, round_number, session_code, refresh=refresh)
 
 
 @st.cache_resource
@@ -99,11 +99,18 @@ def source_caption(metadata, default='FastF1 session data'):
     if retrieved:
         stamp = retrieved[:16].replace('T', ' ')
         st.caption(f'{metadata.get("source", default)} · source retrieved {stamp} UTC')
+    if metadata.get('archive_revision'):
+        published = str(metadata.get('published_utc', ''))[:16].replace('T', ' ')
+        st.caption(f'Archive release {metadata["archive_revision"]} published {published} UTC. New sessions appear after the archive publishes them.')
+    if metadata.get('cached_fallback') and not metadata.get('access_limited'):
+        st.warning('The source refresh is unavailable. Showing the saved archive for this session.')
 
 
 def session_results(analysis, teams, scope, season=None):
     results = analysis['results']
     metadata = analysis['metadata']
+    from hosted_data import published_classification
+    results, archive_classification = published_classification(analysis, season)
     official_points = False
     if season is not None and metadata['session_code'] in ('R', 'S') and results.points.isna().any():
         kind = 'Grand Prix' if metadata['session_code'] == 'R' else 'Sprint'
@@ -122,12 +129,17 @@ def session_results(analysis, teams, scope, season=None):
     source_caption(metadata)
     if metadata.get('quality_note'):
         st.caption(metadata['quality_note'])
-    if official_points:
+    if archive_classification:
+        st.caption('Published session classification is matched from Jolpica by weekend and driver. Lap times and tyre data come from the session archive.')
+    elif metadata.get('classification_available') is False:
+        st.info('Official classification is not available for this session yet. Lap timing is available below and in Lap analysis.')
+    if official_points and not archive_classification:
         st.caption('Points and missing grid positions are matched to published Jolpica race results. OpenF1 supplies the session classification and lap timing.')
     if not metadata.get('deleted_laps_checked', True):
         st.warning('Some lap deletion statuses are unavailable. Unconfirmed laps are excluded from fastest-lap and pace comparisons.')
     if code in ('R', 'S'):
-        st.caption('Published session classification. Timing results may differ from subsequently amended official standings.')
+        if view.position.notna().any():
+            st.caption('Published session classification. Timing results may differ from subsequently amended official standings.')
         points = view.dropna(subset=['points'])
         if not points.empty:
             chart(px.bar(points.sort_values('position'), x='code', y='points', color='team',
@@ -411,7 +423,7 @@ def app():
                 st.warning('The weekend schedule is unavailable. Use Refresh now to retry.')
             else:
                 replay_round, replay_code, replay_started = choose_session(schedule, 'browser-replay')
-                st.caption('Watch the recorded session in your browser. The first load downloads car positions and telemetry; later viewers reuse the prepared data.')
+                st.caption('Watch the published session archive in your browser. The first load downloads lap recordings and can take several minutes; later viewers reuse the prepared replay. This is recorded playback.')
                 replay_key = (replay_round, replay_code)
                 if st.button('Load browser replay', disabled=not replay_started, type='primary'):
                     try:
@@ -492,10 +504,11 @@ def app():
             st.caption('Space: pause • ← / →: seek • ↑ / ↓: playback speed • click a driver: telemetry')
     with sources:
         st.subheader('Sources and validation')
-        st.write('Championship results: Jolpica F1 API. Weekend schedule and local session analysis: FastF1. Online session analysis and browser replay: OpenF1 historical data. Refresh checks run every 15 minutes while the app is open. Completed sessions appear after the source publishes them.')
+        st.write('Championship results: Jolpica F1 API. Weekend schedule and local session analysis: FastF1. Online session analysis and browser replay: TracingInsights published archives, with OpenF1 historical data as a backup. Refresh checks run every 15 minutes while the app is open. Completed sessions appear after the source publishes them.')
         st.markdown('[FastF1 session data and schedule](https://docs.fastf1.dev/)')
+        st.markdown('[TracingInsights session archives and data reference](https://github.com/TracingInsights/2026)')
         st.markdown('[OpenF1 timing, positions and telemetry](https://openf1.org/docs/)')
-        st.caption('OpenF1 can restrict all unauthenticated requests during a live session, including older sessions. Saved completed session data remains available when present. New downloads can resume after the restriction ends.')
+        st.caption('TracingInsights archives remain available during other live sessions. The publisher usually adds sessions about 30 minutes after they finish. Replay positions come from recorded lap telemetry. Gaps and classification coverage depend on the source. OpenF1 may restrict backup downloads during a live session.')
         st.caption('Session timing and classifications may be derived by FastF1. Championship point reconciliation below uses Grand Prix and Sprint results from Jolpica.')
         if season is not None:
             st.dataframe(season['reconciliation'], hide_index=True, width='stretch')

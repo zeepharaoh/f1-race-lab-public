@@ -10,4 +10,4 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m pytest -q
-      - run: python -m compileall -q main.py dashboard.py online.py hosting.py data.py weekend.py openf1_data.py web_replay.py replay_player.py launch.py replay_insights.py replay_overlays.py replay_strategy.py championship_data.py championship_overlays.py season_analysis.py
+      - run: python -m compileall -q main.py dashboard.py online.py hosting.py data.py weekend.py hosted_data.py archive_source.py archive_analysis.py archive_replay.py openf1_data.py web_replay.py replay_player.py launch.py replay_insights.py replay_overlays.py replay_strategy.py championship_data.py championship_overlays.py season_analysis.py

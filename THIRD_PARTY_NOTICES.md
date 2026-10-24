@@ -18,8 +18,14 @@ The engine is installed separately. Its source, assets and Python environment ar
 
 FastF1, Streamlit, Plotly, pandas, Matplotlib, Requests and the replay engine's dependencies retain their own licences. Their installed distributions supply the applicable licence texts and copyright notices. Keep those notices when redistributing dependencies.
 
+## TracingInsights session archive
+
+Hosted timing and browser replay primarily read the public [TracingInsights 2026 archive](https://github.com/TracingInsights/2026), created by TracingInsights from FastF1 and other sources. The provider publishes the archive under the [Apache License 2.0](licenses/TracingInsights-APACHE-2.0.txt). Keep this attribution, the upstream notices and the licence copy with redistributed archive data. This repository does not copy the upstream processing scripts, images or audio.
+
+The application normalizes timing fields, filters clean laps, samples telemetry for browser playback and derives a replay timeline. Those transformations are this project's implementation. The original archive remains attributed to TracingInsights. These notices do not grant rights beyond those held by the data publisher or remove the underlying rights of Formula 1 and other owners.
+
 ## Data and trademarks
 
-Championship results and standings are obtained through the [Jolpica F1 API](https://github.com/jolpica/jolpica-f1). Local session timing and telemetry are obtained through [FastF1](https://docs.fastf1.dev/). Hosted session timing and browser replay data are obtained through [OpenF1](https://openf1.org/docs/), an independent community project intended for education, research and noncommercial fan use. These software sources do not transfer ownership of the underlying Formula 1 data.
+Championship results and standings are obtained through the [Jolpica F1 API](https://github.com/jolpica/jolpica-f1). Local session timing and telemetry are obtained through [FastF1](https://docs.fastf1.dev/). Hosted session timing and browser replay use the TracingInsights archive first, with backup data through [OpenF1](https://openf1.org/docs/), an independent community project intended for education, research and noncommercial fan use. These software sources do not transfer ownership of the underlying Formula 1 data.
 
 Formula 1, team and driver names, related trademarks, circuit information and third-party assets belong to their respective owners. They are not covered by this repository's MIT licence. See the [README disclaimer](README.md#disclaimer) and the [Formula 1 guidelines](https://www.formula1.com/en/information/guidelines.4EOKE9RRqevL4niTK9kWyt).

@@ -64,8 +64,12 @@
     el('boardTitle').textContent = 'Session order';
     el('coverage').textContent = 'Practice and qualifying follow the recorded session clock. Session order is the published timing order, not cars in track order. Race gaps do not apply.';
   }
+  if (metadata.archived) {
+    el('coverage').textContent = [metadata.position_definition, metadata.gap_definition, metadata.pit_definition].filter(Boolean).join(' ');
+  }
   const limitations = metadata.limitations || metadata.warnings || [];
-  el('sourceNote').textContent = [metadata.source || 'OpenF1', 'Car positions are approximate and sampled for playback. Gaps and telemetry update at their source frequency.', ...limitations].join(' ');
+  const playbackNote = metadata.archived ? 'Car positions use recorded lap telemetry. Missing recordings leave gaps in playback.' : 'Car positions are approximate and sampled for playback. Gaps and telemetry update at their source frequency.';
+  el('sourceNote').textContent = [metadata.source || 'OpenF1', playbackNote, ...limitations].join(' ');
   const rows = new Map();
   for (const driver of drivers) {
     const row = document.createElement('tr');
