@@ -16,6 +16,7 @@ from data import ROOT
 from weekend import SESSION_LABELS, SessionUnavailableError, normalize_session_code, resolve_session
 
 RELEASE_URL = 'https://api.github.com/repos/TracingInsights/2026/releases/latest'
+CONTENTS_BASE = 'https://api.github.com/repos/TracingInsights/2026/contents/'
 CDN_BASE = 'https://cdn.jsdelivr.net/gh/TracingInsights/2026@'
 CACHE_TTL = 15 * 60
 MAX_CACHE_BYTES = 192 * 1024 * 1024
@@ -118,7 +119,7 @@ def _write_cache(path, url, data, retrieved):
                 pass
 
 
-def _request_json(url, limit):
+def _request_json(url, limit, *, block_on_access=True):
     global _BLOCKED_UNTIL
     with _HTTP_SLOTS:
         with _STATE_LOCK:
@@ -129,8 +130,9 @@ def _request_json(url, limit):
             response = requests.get(url, timeout=(5, 30), stream=True, allow_redirects=False,
                                     headers={'Accept': 'application/json'}, auth=_PUBLIC_AUTH)
             if response.status_code in (401, 403, 429):
-                with _STATE_LOCK:
-                    _BLOCKED_UNTIL = time.monotonic() + ACCESS_RETRY_SECONDS
+                if block_on_access:
+                    with _STATE_LOCK:
+                        _BLOCKED_UNTIL = time.monotonic() + ACCESS_RETRY_SECONDS
                 raise ArchiveUnavailableError('access_limited')
             if response.status_code == 404:
                 raise ArchiveUnavailableError('not_published')
@@ -157,13 +159,14 @@ def _request_json(url, limit):
                 response.close()
 
 
-def _fetch_json(url, limit, *, mutable=False, refresh=False, cache=True, status=None):
+def _fetch_json(url, limit, *, mutable=False, refresh=False, cache=True, status=None,
+                block_on_access=True):
     path = _cache_path(url)
     saved = _read_cache(path, url, limit) if cache else None
     if saved and (not mutable or (not refresh and (_now() - _timestamp(saved[1])).total_seconds() < CACHE_TTL)):
         return saved
     try:
-        data, retrieved = _request_json(url, limit)
+        data, retrieved = _request_json(url, limit, block_on_access=block_on_access)
     except ArchiveUnavailableError:
         if saved:
             if status is not None:
@@ -224,6 +227,28 @@ def fetch_archive_file(session, relative_path):
     path = '/'.join(quote(part, safe='') for part in (event, label, *relative_path.split('/')))
     url = CDN_BASE + session['revision'] + '/' + path
     return _fetch_json(url, MAX_TELEMETRY_BYTES if telemetry else MAX_SESSION_BYTES, cache=not telemetry)
+
+
+def get_session_fingerprint(session):
+    """Identify the selected session contents in a published release."""
+    try:
+        event, label = _validate_session(session)
+        revision = session['revision']
+        url = CONTENTS_BASE + quote(event, safe='') + '?ref=' + quote(revision, safe='')
+        listing, _ = _fetch_json(url, 1024 * 1024, block_on_access=False)
+        if not isinstance(listing, list) or any(not isinstance(item, dict) for item in listing):
+            return None
+        matches = [item for item in listing if item.get('name') == label]
+        if len(matches) != 1:
+            return None
+        entry = matches[0]
+        fingerprint = entry.get('sha')
+        if (entry.get('type') != 'dir' or entry.get('path') != event + '/' + label
+                or not isinstance(fingerprint, str) or not re.fullmatch('[0-9a-fA-F]{40}', fingerprint)):
+            return None
+        return fingerprint.lower()
+    except (ArchiveUnavailableError, AttributeError, TypeError, ValueError, KeyError, OverflowError):
+        return None
 
 
 def _number(value):
@@ -322,6 +347,9 @@ def load_archive_session(year, round_number, session_code, *, refresh=False):
         _validate_laps(columns, drivers, scheduled, published)
         result.update(drivers=drivers, lap_columns=columns,
                       retrieved_utc=min((release_retrieved, driver_retrieved, laps_retrieved), key=_timestamp))
+        fingerprint = get_session_fingerprint(result)
+        if fingerprint is not None:
+            result['session_fingerprint'] = fingerprint
         return result
     except ArchiveUnavailableError:
         raise

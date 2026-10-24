@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
 import threading
+import time
 
 import pandas as pd
 import pytest
@@ -41,12 +42,16 @@ def feeds(monkeypatch, tmp_path):
             'lSD': ['2026-10-24T17:32:00.000000000', '2026-10-24T17:33:30Z', '2026-10-24T17:32:00Z']}
     release = {'tag_name': '2026.297.2', 'published_at': '2026-10-24T19:00:00Z',
                'draft': False, 'prerelease': False}
-    responses = {'release': release, 'drivers.json': {'drivers': drivers}, 'session_laptimes.json': laps}
+    responses = {'release': release, 'drivers.json': {'drivers': drivers}, 'session_laptimes.json': laps,
+                 'contents': [{'name': 'Practice 3', 'path': 'United States Grand Prix/Practice 3',
+                               'type': 'dir', 'sha': 'a' * 40}]}
     calls = []
 
     def get(url, **kwargs):
         calls.append((url, kwargs))
-        data = responses['release'] if url == archive.RELEASE_URL else responses[url.rsplit('/', 1)[-1]]
+        key = ('release' if url == archive.RELEASE_URL else 'contents'
+               if url.startswith(archive.CONTENTS_BASE) else url.rsplit('/', 1)[-1])
+        data = responses[key]
         if isinstance(data, BaseException):
             raise data
         return data if isinstance(data, Response) else Response(data)
@@ -67,19 +72,21 @@ def test_loads_one_pinned_release_and_preserves_original_cache_times(feeds, monk
     assert session['retrieved_utc'] == now.isoformat()
     assert session['archive_event'] == 'United States Grand Prix'
     assert session['archive_session'] == 'Practice 3'
+    assert session['session_fingerprint'] == 'a' * 40
     assert session['drivers'][0]['driver'] == 'AAA'
     assert session['lap_columns']['drv'] == ['AAA', 'AAA', 'BBB']
     assert '/tree/2026.297.2/United%20States%20Grand%20Prix/Practice%203' in session['source_url']
-    assert len(calls) == 3
+    assert len(calls) == 4
     for url, options in calls:
         assert options['timeout'] == (5, 30) and options['stream']
         assert options['allow_redirects'] is False
         assert options['auth'] is archive._PUBLIC_AUTH
         assert 'Authorization' not in options['headers']
-        assert '@2026.297.2/' in url or url == archive.RELEASE_URL
+        assert ('@2026.297.2/' in url or url == archive.RELEASE_URL
+                or url == archive.CONTENTS_BASE + 'United%20States%20Grand%20Prix?ref=2026.297.2')
     monkeypatch.setattr(archive, '_now', lambda: now + timedelta(minutes=10))
     cached = archive.load_archive_session(2026, 18, 'FP3')
-    assert len(calls) == 3
+    assert len(calls) == 4
     assert cached['retrieved_utc'] == session['retrieved_utc']
     assert not cached['cached_fallback']
 
@@ -89,7 +96,7 @@ def test_refresh_updates_release_but_reuses_immutable_files(feeds, monkeypatch):
     session = archive.load_archive_session(2026, 18, 'FP3')
     monkeypatch.setattr(archive, '_now', lambda: now + timedelta(hours=1))
     refreshed = archive.load_archive_session(2026, 18, 'FP3', refresh=True)
-    assert len(calls) == 4
+    assert len(calls) == 5
     assert refreshed['retrieved_utc'] == session['retrieved_utc']
     assert not refreshed['cached_fallback']
 
@@ -102,7 +109,7 @@ def test_saved_release_remains_usable_during_temporary_denial(feeds, monkeypatch
     cached = archive.load_archive_session(2026, 18, 'FP3', refresh=True)
     assert cached['retrieved_utc'] == session['retrieved_utc']
     assert cached['cached_fallback']
-    assert len(calls) == 4
+    assert len(calls) == 5
 
 
 @pytest.mark.parametrize('status', [401, 403, 429])
@@ -128,7 +135,7 @@ def test_one_missing_file_does_not_block_other_files(feeds):
     assert caught.value.reason == 'not_published'
     weather, _ = archive.fetch_archive_file(session, 'weather.json')
     assert weather['wAT'] == [22]
-    assert len(calls) == 5
+    assert len(calls) == 6
 
 
 @pytest.mark.parametrize('response', [
@@ -244,8 +251,8 @@ def test_telemetry_is_bounded_but_not_written_as_raw_cache(feeds):
     first, _ = archive.fetch_archive_file(session, 'AAA/1_tel.json')
     second, _ = archive.fetch_archive_file(session, 'AAA/1_tel.json')
     assert first == second
-    assert len(calls) == 5
-    assert len(list((archive.ROOT / 'cache' / 'tracinginsights').glob('*.json'))) == 3
+    assert len(calls) == 6
+    assert len(list((archive.ROOT / 'cache' / 'tracinginsights').glob('*.json'))) == 4
 
 
 @pytest.mark.parametrize('path', ['../drivers.json', '/drivers.json', 'AAA/../../drivers.json',
@@ -255,7 +262,7 @@ def test_file_paths_are_restricted_to_archive_json(feeds, path):
     session = archive.load_archive_session(2026, 18, 'FP3')
     with pytest.raises(archive.ArchiveUnavailableError):
         archive.fetch_archive_file(session, path)
-    assert len(calls) == 3
+    assert len(calls) == 4
 
 
 def test_cache_budget_is_enforced(feeds, monkeypatch):
@@ -298,3 +305,97 @@ def test_http_concurrency_is_bounded_to_four(feeds, monkeypatch):
             release.set()
         assert all(future.result()[0] == {} for future in futures)
     assert counts['maximum'] == 4 and counts['active'] == 0
+
+
+def test_session_fingerprint_survives_unrelated_release_updates(feeds, monkeypatch):
+    responses, calls, _, now = feeds
+    first = archive.load_archive_session(2026, 18, 'FP3')
+    responses['release']['tag_name'] = '2026.298.1'
+    monkeypatch.setattr(archive, '_now', lambda: now + timedelta(hours=1))
+    updated = archive.load_archive_session(2026, 18, 'FP3', refresh=True)
+    assert first['revision'] != updated['revision']
+    assert first['session_fingerprint'] == updated['session_fingerprint'] == 'a' * 40
+    listings = [url for url, _ in calls if url.startswith(archive.CONTENTS_BASE)]
+    assert listings == [archive.CONTENTS_BASE + 'United%20States%20Grand%20Prix?ref=' + tag
+                        for tag in ('2026.297.2', '2026.298.1')]
+
+
+def test_fingerprint_uses_pinned_immutable_listing_and_can_check_older_tag(feeds):
+    responses, calls, _, _ = feeds
+    session = archive.load_archive_session(2026, 18, 'FP3')
+    responses['contents'][0]['sha'] = 'b' * 40
+    assert archive.get_session_fingerprint(session) == 'a' * 40
+    assert len(calls) == 4
+    assert archive.get_session_fingerprint({**session, 'revision': '2026.298.1'}) == 'b' * 40
+    assert archive.get_session_fingerprint(session) == 'a' * 40
+    assert len(calls) == 5
+
+
+@pytest.mark.parametrize('listing', [
+    {}, [], [None], [{'name': 'Practice 2', 'type': 'dir', 'path': 'United States Grand Prix/Practice 2', 'sha': 'a' * 40}],
+    [{'name': 'Practice 3', 'type': 'file', 'path': 'United States Grand Prix/Practice 3', 'sha': 'a' * 40}],
+    [{'name': 'Practice 3', 'type': 'dir', 'path': 'Singapore Grand Prix/Practice 3', 'sha': 'a' * 40}],
+    [{'name': 'Practice 3', 'type': 'dir', 'path': 'United States Grand Prix/Practice 3', 'sha': 'a' * 39}],
+    [{'name': 'Practice 3', 'type': 'dir', 'path': 'United States Grand Prix/Practice 3', 'sha': 'g' * 40}],
+    [{'name': 'Practice 3', 'type': 'dir', 'path': 'United States Grand Prix/Practice 3', 'sha': 123}],
+    [{'name': 'Practice 3', 'type': 'dir', 'path': 'United States Grand Prix/Practice 3', 'sha': 'a' * 40}] * 2,
+])
+def test_optional_malformed_fingerprint_does_not_break_session_data(feeds, listing):
+    responses, _, _, _ = feeds
+    responses['contents'] = listing
+    session = archive.load_archive_session(2026, 18, 'FP3')
+    assert 'session_fingerprint' not in session
+    assert session['drivers'][0]['driver'] == 'AAA'
+    assert session['lap_columns']['lap'] == [1, 2, 1]
+
+
+@pytest.mark.parametrize('response', [
+    Response(status=401), Response(status=403), Response(status=429), Response(status=404),
+    Response(status=500), Response(body=b'bad json'), Response(body=b'x' * (1024 * 1024 + 1)),
+    requests.ConnectionError('https://private.example/token=secret'),
+])
+def test_optional_fingerprint_failure_does_not_block_cdn_data(feeds, response):
+    responses, calls, _, _ = feeds
+    responses['contents'] = response
+    session = archive.load_archive_session(2026, 18, 'FP3')
+    assert 'session_fingerprint' not in session
+    assert archive._BLOCKED_UNTIL == 0
+    responses['weather.json'] = {'wAT': [22]}
+    weather, _ = archive.fetch_archive_file(session, 'weather.json')
+    assert weather == {'wAT': [22]} and len(calls) == 5
+    if isinstance(response, Response):
+        assert response.closed
+
+
+def test_optional_fingerprint_respects_existing_request_block(feeds, monkeypatch):
+    _, calls, _, _ = feeds
+    session = archive.load_archive_session(2026, 18, 'FP3')
+    monkeypatch.setattr(archive, '_BLOCKED_UNTIL', time.monotonic() + 60)
+    assert archive.get_session_fingerprint({**session, 'revision': '2026.298.1'}) is None
+    assert len(calls) == 4
+
+
+@pytest.mark.parametrize('change', [
+    {'year': 2025}, {'revision': 'main'}, {'revision': '../2026.1.2'},
+    {'archive_session': 'Practice 2'}, {'archive_event': '../United States Grand Prix'},
+])
+def test_fingerprint_rejects_invalid_scope_without_http(feeds, change):
+    _, calls, _, _ = feeds
+    session = archive.load_archive_session(2026, 18, 'FP3')
+    assert archive.get_session_fingerprint({**session, **change}) is None
+    assert len(calls) == 4
+
+
+def test_optional_fingerprint_does_not_advance_source_retrieval_time(feeds, monkeypatch):
+    _, _, _, now = feeds
+    original_get = archive.requests.get
+
+    def get(url, **kwargs):
+        if url.startswith(archive.CONTENTS_BASE):
+            monkeypatch.setattr(archive, '_now', lambda: now + timedelta(hours=1))
+        return original_get(url, **kwargs)
+
+    monkeypatch.setattr(archive.requests, 'get', get)
+    session = archive.load_archive_session(2026, 18, 'FP3')
+    assert session['session_fingerprint'] == 'a' * 40
+    assert session['retrieved_utc'] == now.isoformat()

@@ -102,6 +102,8 @@ def source_caption(metadata, default='FastF1 session data'):
     if metadata.get('archive_revision'):
         published = str(metadata.get('published_utc', ''))[:16].replace('T', ' ')
         st.caption(f'Archive release {metadata["archive_revision"]} published {published} UTC. New sessions appear after the archive publishes them.')
+    if metadata.get('checked_archive_revision'):
+        st.caption(f'Session unchanged in archive release {metadata["checked_archive_revision"]}. Reusing the prepared replay.')
     if metadata.get('cached_fallback') and not metadata.get('access_limited'):
         st.warning('The source refresh is unavailable. Showing the saved archive for this session.')
 

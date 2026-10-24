@@ -5,8 +5,10 @@ from datetime import datetime, timezone
 import gzip
 import json
 import math
+import re
 from pathlib import Path
 import threading
+import uuid
 from types import SimpleNamespace
 
 import pandas as pd
@@ -263,6 +265,7 @@ def _build_archive_replay(archive, year, round_number, code, fetch_file, workers
                     start_utc=_date(origin), end_utc=_date(ending),
                     cached_fallback=bool(archive.get('cached_fallback')),
                     published_utc=archive['published_utc'],
+                    session_fingerprint=archive.get('session_fingerprint'),
                     source_retrieved_utc=min(stamps, key=_timestamp), feed_retrieved_utc=feed_stamps,
                     position_definition=('Lap-end checkpoints from recorded timing; not live track order' if code in ('R', 'S')
                                          else 'Session classification is unavailable from this archive.'),
@@ -282,14 +285,52 @@ def _cached_replay(path, year, round_number, code):
     return cached if cached is not None and cached['metadata'].get('provider') == PROVIDER else None
 
 
+def _fingerprint(value):
+    return value if isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40}', value) else None
+
+
+def _save_replay(path, payload):
+    temporary = path.with_suffix('.' + uuid.uuid4().hex + '.tmp')
+    try:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        with gzip.open(temporary, 'wt', encoding='utf-8') as output:
+            json.dump(payload, output, separators=(',', ':'), allow_nan=False)
+        temporary.replace(path)
+    except OSError:
+        pass
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def load_archive_replay(year, round_number, session_code, *, refresh=False):
-    from archive_source import ArchiveUnavailableError, load_archive_session
+    from archive_source import ArchiveUnavailableError, get_session_fingerprint, load_archive_session
     code = str(session_code).upper()
     path = CACHE / f'{int(year)}_{int(round_number)}_{code}_v{SCHEMA_VERSION}.json.gz'
     try:
         archive = load_archive_session(year, round_number, code, refresh=refresh)
         cached = _cached_replay(path, year, round_number, code)
-        if cached is not None and cached['metadata'].get('archive_revision') == archive['revision']:
+        current_fingerprint = _fingerprint(archive.get('session_fingerprint'))
+        if cached is not None:
+            metadata = cached['metadata']
+            previous_fingerprint = _fingerprint(metadata.get('session_fingerprint'))
+            same_revision = metadata.get('archive_revision') == archive['revision']
+            if current_fingerprint and previous_fingerprint is None:
+                previous_fingerprint = (current_fingerprint if same_revision else get_session_fingerprint(
+                    {**archive, 'revision': metadata.get('archive_revision')}))
+                previous_fingerprint = _fingerprint(previous_fingerprint)
+                if previous_fingerprint:
+                    metadata['session_fingerprint'] = previous_fingerprint
+                    _save_replay(path, cached)
+            unchanged = (previous_fingerprint == current_fingerprint
+                         if previous_fingerprint and current_fingerprint else same_revision)
+        else:
+            unchanged = False
+        if unchanged:
+            if not same_revision:
+                cached['metadata']['checked_archive_revision'] = archive['revision']
             if archive.get('cached_fallback'):
                 cached['metadata']['cached_fallback'] = True
                 cached['metadata']['warnings'] = list(dict.fromkeys([*cached['metadata'].get('warnings', []),
@@ -306,12 +347,5 @@ def load_archive_replay(year, round_number, session_code, *, refresh=False):
         cached['metadata']['warnings'] = list(dict.fromkeys([*cached['metadata'].get('warnings', []),
             'The archive could not be refreshed. Showing a previously saved completed replay.']))
         return cached
-    try:
-        CACHE.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix('.tmp')
-        with gzip.open(temporary, 'wt', encoding='utf-8') as output:
-            json.dump(payload, output, separators=(',', ':'), allow_nan=False)
-        temporary.replace(path)
-    except OSError:
-        pass
+    _save_replay(path, payload)
     return payload

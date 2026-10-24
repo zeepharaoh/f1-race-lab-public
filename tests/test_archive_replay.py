@@ -299,3 +299,75 @@ def test_new_published_revision_rebuilds_prepared_replay(monkeypatch, tmp_path):
     result = load_archive_replay(2026, 1, 'R', refresh=True)
     assert calls == ['2026.1.124']
     assert result['metadata']['archive_revision'] == '2026.1.124'
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_unchanged_session_reuses_cache_across_archive_releases(monkeypatch, tmp_path, legacy):
+    fingerprint = 'a' * 40
+    payload = build()
+    if not legacy:
+        payload['metadata']['session_fingerprint'] = fingerprint
+    path = tmp_path / '2026_1_R_v1.json.gz'
+    with gzip.open(path, 'wt', encoding='utf-8') as output:
+        json.dump(payload, output, allow_nan=False)
+    original_retrieved = payload['metadata']['source_retrieved_utc']
+    info, checks = archive(), []
+    info.update(revision='2026.1.124', session_fingerprint=fingerprint)
+    def old_fingerprint(bundle):
+        checks.append(bundle['revision'])
+        return fingerprint
+    def forbidden(*args, **kwargs):
+        raise AssertionError('An unchanged session must not download telemetry again')
+    monkeypatch.setattr('archive_source.load_archive_session', lambda *args, **kwargs: info)
+    monkeypatch.setattr('archive_source.get_session_fingerprint', old_fingerprint)
+    monkeypatch.setattr('archive_replay.build_archive_replay', forbidden)
+    monkeypatch.setattr('archive_replay.CACHE', tmp_path)
+    result = load_archive_replay(2026, 1, 'R', refresh=True)
+    assert result['cars'] == payload['cars']
+    assert result['metadata']['source_retrieved_utc'] == original_retrieved
+    assert result['metadata']['retrieved_utc'] == payload['metadata']['retrieved_utc']
+    assert result['metadata']['archive_revision'] == '2026.1.123'
+    assert result['metadata']['checked_archive_revision'] == '2026.1.124'
+    assert checks == (['2026.1.123'] if legacy else [])
+    assert result['metadata']['session_fingerprint'] == fingerprint
+    assert json.loads(gzip.decompress(path.read_bytes()))['metadata']['session_fingerprint'] == fingerprint
+
+
+def test_changed_session_fingerprint_rebuilds_instead_of_using_stale_telemetry(monkeypatch, tmp_path):
+    payload = build()
+    payload['metadata']['session_fingerprint'] = 'a' * 40
+    path = tmp_path / '2026_1_R_v1.json.gz'
+    with gzip.open(path, 'wt', encoding='utf-8') as output:
+        json.dump(payload, output, allow_nan=False)
+    info, calls = archive(), []
+    info.update(revision='2026.1.124', session_fingerprint='b' * 40)
+    def rebuilt(bundle, *args, **kwargs):
+        calls.append(bundle['session_fingerprint'])
+        result = dict(payload, metadata=dict(payload['metadata']))
+        result['metadata'].update(archive_revision=bundle['revision'], session_fingerprint=bundle['session_fingerprint'])
+        return result
+    monkeypatch.setattr('archive_source.load_archive_session', lambda *args, **kwargs: info)
+    monkeypatch.setattr('archive_replay.build_archive_replay', rebuilt)
+    monkeypatch.setattr('archive_replay.CACHE', tmp_path)
+    result = load_archive_replay(2026, 1, 'R', refresh=True)
+    assert calls == ['b' * 40]
+    assert result['metadata']['archive_revision'] == '2026.1.124'
+
+
+def test_missing_session_fingerprint_preserves_revision_fallback(monkeypatch, tmp_path):
+    payload = build()
+    path = tmp_path / '2026_1_R_v1.json.gz'
+    with gzip.open(path, 'wt', encoding='utf-8') as output:
+        json.dump(payload, output, allow_nan=False)
+    info = archive()
+    info.update(revision='2026.1.124', session_fingerprint='b' * 40)
+    calls = []
+    monkeypatch.setattr('archive_source.load_archive_session', lambda *args, **kwargs: info)
+    monkeypatch.setattr('archive_source.get_session_fingerprint', lambda *args, **kwargs: None)
+    def rebuilt(*args, **kwargs):
+        calls.append('rebuilt')
+        return payload
+    monkeypatch.setattr('archive_replay.build_archive_replay', rebuilt)
+    monkeypatch.setattr('archive_replay.CACHE', tmp_path)
+    load_archive_replay(2026, 1, 'R', refresh=True)
+    assert calls == ['rebuilt']
