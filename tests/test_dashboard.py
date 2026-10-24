@@ -457,3 +457,125 @@ def test_hosted_replay_failure_is_visible_and_cannot_reuse_another_session(hoste
     assert not app.exception
     assert not app.get('iframe')
     assert any('Recorded positions are not published' in item.value for item in app.warning)
+
+
+def limited_source_metadata():
+    from openf1_data import OpenF1AccessError
+
+    return dict(access_limited=True, cached_fallback=True,
+        access_reason='live_access_restricted',
+        access_message=str(OpenF1AccessError(reason='live_access_restricted')),
+        source_retrieved_utc='2026-01-01T08:15:00+00:00',
+        retrieved_utc='2026-01-02T03:00:00+00:00',
+        loaded_utc='2026-10-24T12:30:00+00:00')
+
+
+def assert_saved_source_notice(app):
+    assert any('OpenF1' in item.value and 'saved data' in item.value.lower()
+               for item in app.warning)
+    captions = [item.value for item in app.caption if 'source retrieved' in item.value.lower()]
+    assert any('2026-01-01 08:15' in value for value in captions)
+    assert all('2026-10-24 12:30' not in value and '2026-01-02 03:00' not in value
+               for value in captions)
+    warnings = ' '.join(item.value for item in app.warning)
+    assert 'https://api.openf1.org' not in warnings
+    assert 'access_token=' not in warnings
+
+
+@pytest.mark.parametrize('view, button_label, state_key', [
+    ('weekend', 'Load session data', 'loaded_session'),
+    ('pace', 'Load lap analysis', 'lap_analysis'),
+])
+def test_hosted_saved_timing_keeps_source_time_scope_and_session(
+        hosted_dashboard, monkeypatch, view, button_label, state_key):
+    import openf1_data
+
+    app, _ = hosted_dashboard
+    loader = openf1_data.load_openf1_analysis
+
+    def saved_analysis(*args, **kwargs):
+        analysis = loader(*args, **kwargs)
+        analysis['metadata'].update(limited_source_metadata())
+        return analysis
+
+    monkeypatch.setattr(openf1_data, 'load_openf1_analysis', saved_analysis)
+    next(control for control in app.radio if control.label == 'Comparison scope').set_value('Choose teams').run()
+    next(control for control in app.multiselect if control.label == 'Teams').set_value(['Ferrari']).run()
+    app.selectbox(key=f'{view}-session').set_value('FP1').run()
+    next(button for button in app.button if button.label == button_label).click().run()
+    assert not app.exception
+    assert_saved_source_notice(app)
+    assert app.session_state[state_key][0] == (2, 'FP1')
+    if view == 'weekend':
+        table = next(item.value for item in app.dataframe if 'best_lap_seconds' in item.value.columns)
+        assert set(table.team) == {'Ferrari'}
+    else:
+        assert set(next(control for control in app.multiselect
+                        if control.label == 'Drivers on lap charts').options) == {'HAM', 'LEC'}
+    app.selectbox(key=f'{view}-session').set_value('Q').run()
+    assert not app.exception
+    assert not any('best_lap_seconds' in item.value.columns for item in app.dataframe)
+    assert not any(control.label == 'Drivers on lap charts' for control in app.multiselect)
+    assert next(control for control in app.multiselect if control.label == 'Teams').value == ['Ferrari']
+    assert not any('2026-01-01 08:15' in item.value for item in app.caption)
+
+
+def test_hosted_saved_replay_keeps_source_time_and_selected_scope(hosted_replay, monkeypatch):
+    import web_replay
+
+    app, calls = hosted_replay
+    loader = web_replay.load_browser_replay
+
+    def saved_replay(*args, **kwargs):
+        payload = loader(*args, **kwargs)
+        payload['metadata'].update(limited_source_metadata())
+        return payload
+
+    monkeypatch.setattr(web_replay, 'load_browser_replay', saved_replay)
+    next(control for control in app.radio if control.label == 'Comparison scope').set_value('Choose teams').run()
+    next(control for control in app.multiselect if control.label == 'Teams').set_value(['Ferrari']).run()
+    next(button for button in app.button if button.label == 'Load browser replay').click().run()
+    assert not app.exception
+    assert_saved_source_notice(app)
+    assert replay_data(app)['visible_codes'] == ['LEC']
+    assert calls == [(2026, 2, 'R', False)]
+    app.selectbox(key='browser-replay-session').set_value('Q').run()
+    assert not app.exception
+    assert not app.get('iframe')
+    assert next(control for control in app.multiselect if control.label == 'Teams').value == ['Ferrari']
+    assert not any('2026-01-01 08:15' in item.value for item in app.caption)
+
+
+@pytest.mark.parametrize('view, button_label', [
+    ('weekend', 'Load session data'), ('pace', 'Load lap analysis'),
+    ('browser-replay', 'Load browser replay'),
+])
+def test_hosted_uncached_access_failure_is_friendly_and_does_not_show_saved_data(
+        hosted_replay, monkeypatch, view, button_label):
+    import openf1_data
+    import requests
+    import web_replay
+
+    app, _ = hosted_replay
+
+    def denied(*args, **kwargs):
+        error = openf1_data.OpenF1AccessError(reason='live_access_restricted')
+        error.__cause__ = requests.HTTPError(
+            '401 Client Error for https://api.openf1.org/v1/laps?access_token=secret_value')
+        raise error
+
+    monkeypatch.setattr(openf1_data, 'load_openf1_analysis', denied)
+    monkeypatch.setattr(web_replay, 'load_browser_replay', denied)
+    next(button for button in app.button if button.label == button_label).click().run()
+    assert not app.exception
+    warnings = ' '.join(item.value for item in app.warning)
+    assert 'OpenF1' in warnings
+    assert 'live' in warnings.lower()
+    assert 'https://api.openf1.org' not in warnings
+    assert 'secret_value' not in warnings
+    assert 'access_token=' not in warnings
+    assert 'not published' not in warnings.lower()
+    assert 'saved data' not in warnings.lower()
+    assert not app.get('iframe')
+    assert not any('best_lap_seconds' in item.value.columns for item in app.dataframe)
+    assert not any(control.label == 'Drivers on lap charts' for control in app.multiselect)

@@ -1,5 +1,8 @@
 from datetime import datetime, timezone
 import json
+import gzip
+import os
+import time
 from types import SimpleNamespace
 import sys
 from urllib.parse import parse_qsl
@@ -7,6 +10,10 @@ from urllib.parse import parse_qsl
 import pytest
 
 from web_replay import BrowserReplayUnavailable, _locations, _thin_records, build_browser_replay, load_browser_replay
+
+
+class AccessError(ValueError):
+    pass
 
 
 START = '2026-03-08T04:00:00+00:00'
@@ -165,7 +172,8 @@ def test_loader_uses_paced_helper_with_driver_time_bounds_and_serializable_cache
         if endpoint == 'location':
             return [{'date': date(t), 'x': t, 'y': t} for t in range(21)]
         return []
-    monkeypatch.setitem(sys.modules, 'openf1_data', SimpleNamespace(fetch=fetch,
+    monkeypatch.setitem(sys.modules, 'openf1_data', SimpleNamespace(fetch=fetch, OpenF1AccessError=AccessError,
+        get_source_access_status=lambda *args, **kwargs: {},
         fetched_at=lambda *args, **kwargs: date(30),
         resolve_openf1_session=lambda *args, **kwargs: session))
     monkeypatch.setattr('web_replay.CACHE', tmp_path)
@@ -193,7 +201,8 @@ def test_loader_optional_feed_failure_remains_visible(monkeypatch, tmp_path):
         if endpoint == 'pit':
             raise requests.HTTPError('source unavailable')
         return []
-    monkeypatch.setitem(sys.modules, 'openf1_data', SimpleNamespace(fetch=fetch,
+    monkeypatch.setitem(sys.modules, 'openf1_data', SimpleNamespace(fetch=fetch, OpenF1AccessError=AccessError,
+        get_source_access_status=lambda *args, **kwargs: {},
         fetched_at=lambda *args, **kwargs: date(30),
         resolve_openf1_session=lambda *args, **kwargs: {'date_start': START, 'date_end': date(20), 'session_key': 123}))
     monkeypatch.setattr('web_replay.CACHE', tmp_path)
@@ -209,3 +218,216 @@ def test_requests_date_bounds_match_openf1_filter_parser_without_extra_equals():
     filters = [f'{key}={value}' for key, value in parse_qsl(query)]
     assert filters == ['date>=' + START, 'date<=' + date(20)]
     assert '==' not in ''.join(filters)
+
+
+def _saved_replay(tmp_path, payload, age=7200):
+    path = tmp_path / '2026_1_R_v1.json.gz'
+    with gzip.open(path, 'wt', encoding='utf-8') as output:
+        json.dump(payload, output, allow_nan=False)
+    os.utime(path, (time.time() - age, time.time() - age))
+    return path
+
+
+def _denied_adapter(monkeypatch, fetch=None, resolver=None, status=None):
+    def denied(*args, **kwargs):
+        raise AccessError('OpenF1 currently restricts public access')
+    monkeypatch.setitem(sys.modules, 'openf1_data', SimpleNamespace(
+        OpenF1AccessError=AccessError, fetch=fetch or denied,
+        resolve_openf1_session=resolver or denied,
+        fetched_at=lambda *args, **kwargs: date(30),
+        get_source_access_status=lambda *args, **kwargs: status or {}))
+
+
+@pytest.mark.parametrize('refresh', [False, True])
+def test_access_denial_uses_expired_completed_replay_without_changing_source_times(monkeypatch, tmp_path, refresh):
+    saved = replay()
+    saved['metadata']['retrieved_utc'] = date(30)
+    saved['metadata']['source_retrieved_utc'] = date(25)
+    saved['metadata']['feed_retrieved_utc'] = {'location': date(25)}
+    path = _saved_replay(tmp_path, saved)
+    before, modified = path.read_bytes(), path.stat().st_mtime
+    _denied_adapter(monkeypatch)
+    monkeypatch.setattr('web_replay.CACHE', tmp_path)
+    payload = load_browser_replay(2026, 1, 'R', refresh=refresh)
+    assert payload['cars'] == saved['cars']
+    assert payload['metadata']['access_limited'] and payload['metadata']['cached_fallback']
+    assert payload['metadata']['retrieved_utc'] == date(30)
+    assert payload['metadata']['source_retrieved_utc'] == date(25)
+    assert payload['metadata']['feed_retrieved_utc'] == {'location': date(25)}
+    assert any('previously saved completed replay' in warning for warning in payload['metadata']['warnings'])
+    assert path.read_bytes() == before and path.stat().st_mtime == modified
+
+
+def test_uncached_auth_denial_in_optional_feed_stops_before_subsequent_requests(monkeypatch, tmp_path):
+    calls = []
+    def fetch(endpoint, **params):
+        calls.append(endpoint)
+        if endpoint == 'drivers':
+            return [{'driver_number': 1, 'name_acronym': 'AAA'}]
+        if endpoint == 'laps':
+            return []
+        raise AccessError('OpenF1 currently restricts public access')
+    _denied_adapter(monkeypatch, fetch=fetch, resolver=lambda *args, **kwargs: {
+        'date_start': START, 'date_end': date(20), 'session_key': 123})
+    monkeypatch.setattr('web_replay.CACHE', tmp_path)
+    with pytest.raises(AccessError):
+        load_browser_replay(2026, 1, 'R')
+    assert calls == ['drivers', 'laps', 'position']
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize('invalid', ['future', 'session', 'schema', 'live', 'coordinates', 'shape'])
+def test_access_denial_does_not_fall_back_to_invalid_saved_payload(monkeypatch, tmp_path, invalid):
+    payload = replay()
+    if invalid == 'future':
+        payload['metadata']['end_utc'] = '2999-01-01T00:00:00+00:00'
+    elif invalid == 'session':
+        payload['metadata']['session_code'] = 'S'
+    elif invalid == 'schema':
+        payload['metadata']['schema_version'] = 0
+    elif invalid == 'live':
+        payload['metadata']['is_live'] = True
+    elif invalid == 'coordinates':
+        for car in payload['cars'].values():
+            car['x'] = [None] * len(payload['times'])
+    else:
+        payload['cars']['AAA']['x'] = []
+    _saved_replay(tmp_path, payload)
+    _denied_adapter(monkeypatch)
+    monkeypatch.setattr('web_replay.CACHE', tmp_path)
+    with pytest.raises(AccessError):
+        load_browser_replay(2026, 1, 'R')
+
+
+def test_unrelated_network_error_does_not_silently_use_expired_replay(monkeypatch, tmp_path):
+    import requests
+    _saved_replay(tmp_path, replay())
+    def offline(*args, **kwargs):
+        raise requests.ConnectionError('network unavailable')
+    _denied_adapter(monkeypatch, resolver=offline)
+    monkeypatch.setattr('web_replay.CACHE', tmp_path)
+    with pytest.raises(requests.ConnectionError):
+        load_browser_replay(2026, 1, 'R')
+
+
+def test_source_rows_from_access_limited_cache_flag_whole_new_payload(monkeypatch, tmp_path):
+    def fetch(endpoint, **params):
+        if endpoint == 'drivers':
+            return [{'driver_number': 1, 'name_acronym': 'AAA'}]
+        if endpoint == 'location':
+            return [{'date': date(t), 'x': t, 'y': t} for t in range(21)]
+        return []
+    _denied_adapter(monkeypatch, fetch=fetch, resolver=lambda *args, **kwargs: {
+        'date_start': START, 'date_end': date(20), 'session_key': 123},
+        status={'access_limited': True, 'cached_fallback': True, 'state': 'access_limited_cache'})
+    monkeypatch.setattr('web_replay.CACHE', tmp_path)
+    payload = load_browser_replay(2026, 1, 'R')
+    assert payload['metadata']['access_limited'] and payload['metadata']['cached_fallback']
+    assert 'location' in payload['metadata']['access_limited_feeds']
+    assert payload['metadata']['source_retrieved_utc'] == date(30)
+    assert any('saved source data' in warning for warning in payload['metadata']['warnings'])
+
+
+def test_access_limited_payload_has_short_cache_lifetime(monkeypatch, tmp_path):
+    payload = replay()
+    payload['metadata'].update(access_limited=True, cached_fallback=True, warnings=[])
+    _saved_replay(tmp_path, payload, age=70)
+    calls = []
+    def denied(*args, **kwargs):
+        calls.append('resolve')
+        raise AccessError('access restricted')
+    _denied_adapter(monkeypatch, resolver=denied)
+    monkeypatch.setattr('web_replay.CACHE', tmp_path)
+    assert load_browser_replay(2026, 1, 'R')['metadata']['access_limited']
+    assert calls == ['resolve']
+
+
+@pytest.mark.parametrize('invalid', ['missing', 'naive', 'future', 'before_session_end',
+                                    'future_source', 'future_feed', 'source_after_feed', 'nan', 'overflow'])
+def test_auth_fallback_requires_finite_payload_and_consistent_original_retrieval_times(monkeypatch, tmp_path, invalid):
+    payload = replay()
+    payload['metadata']['retrieved_utc'] = date(30)
+    payload['metadata']['source_retrieved_utc'] = date(25)
+    payload['metadata']['feed_retrieved_utc'] = {'location': date(25)}
+    if invalid == 'missing':
+        del payload['metadata']['retrieved_utc']
+    elif invalid == 'naive':
+        payload['metadata']['retrieved_utc'] = '2026-03-08T04:00:30'
+    elif invalid == 'future':
+        payload['metadata']['retrieved_utc'] = '2999-01-01T00:00:00+00:00'
+    elif invalid == 'before_session_end':
+        payload['metadata']['retrieved_utc'] = date(10)
+    elif invalid == 'future_source':
+        payload['metadata']['source_retrieved_utc'] = date(31)
+    elif invalid == 'future_feed':
+        payload['metadata']['feed_retrieved_utc']['location'] = date(31)
+    elif invalid == 'source_after_feed':
+        payload['metadata']['feed_retrieved_utc']['location'] = date(24)
+    if invalid in ('nan', 'overflow'):
+        encoded = json.dumps(payload).replace('"x": [0.0,', '"x": [NaN,' if invalid == 'nan' else '"x": [1e999,', 1)
+        assert 'NaN' in encoded or '1e999' in encoded
+        path = tmp_path / '2026_1_R_v1.json.gz'
+        with gzip.open(path, 'wt', encoding='utf-8') as output:
+            output.write(encoded)
+        os.utime(path, (time.time() - 7200, time.time() - 7200))
+    else:
+        _saved_replay(tmp_path, payload)
+    _denied_adapter(monkeypatch)
+    monkeypatch.setattr('web_replay.CACHE', tmp_path)
+    with pytest.raises(AccessError):
+        load_browser_replay(2026, 1, 'R')
+
+
+def test_auth_fallback_preserves_aware_non_utc_source_time_strings_and_confirmed_reason(monkeypatch, tmp_path):
+    payload = replay()
+    payload['metadata']['retrieved_utc'] = '2026-03-08T06:00:30+02:00'
+    payload['metadata']['source_retrieved_utc'] = '2026-03-08T06:00:25+02:00'
+    payload['metadata']['feed_retrieved_utc'] = {'location': '2026-03-08T04:00:25Z'}
+    _saved_replay(tmp_path, payload)
+    def denied(*args, **kwargs):
+        error = AccessError('OpenF1 temporarily restricts all API access during a live session.')
+        error.access_reason = 'live_access_restricted'
+        raise error
+    _denied_adapter(monkeypatch, resolver=denied)
+    monkeypatch.setattr('web_replay.CACHE', tmp_path)
+    result = load_browser_replay(2026, 1, 'R')
+    assert result['metadata']['retrieved_utc'] == payload['metadata']['retrieved_utc']
+    assert result['metadata']['source_retrieved_utc'] == payload['metadata']['source_retrieved_utc']
+    assert result['metadata']['feed_retrieved_utc'] == payload['metadata']['feed_retrieved_utc']
+    assert result['metadata']['access_reason'] == 'live_access_restricted'
+    assert 'all API access' in result['metadata']['access_message']
+
+
+def test_resolver_query_provenance_and_access_status_flag_rebuilt_payload(monkeypatch, tmp_path):
+    status_calls, stamp_calls = [], []
+    def fetch(endpoint, **params):
+        if endpoint == 'drivers':
+            return [{'driver_number': 1, 'name_acronym': 'AAA'}]
+        if endpoint == 'location':
+            return [{'date': date(t), 'x': t, 'y': t} for t in range(21)]
+        return []
+    def status(endpoint, **params):
+        status_calls.append((endpoint, params))
+        if endpoint == 'sessions':
+            return {'access_limited': True, 'cached_fallback': True,
+                    'access_reason': 'live_access_restricted',
+                    'access_message': 'OpenF1 restricts past sessions during its live window.'}
+        return {}
+    def stamp(endpoint, **params):
+        stamp_calls.append((endpoint, params))
+        return '2026-03-08T06:00:10+02:00' if endpoint == 'sessions' else date(30)
+    _denied_adapter(monkeypatch, fetch=fetch, resolver=lambda *args, **kwargs: {
+        'date_start': START, 'date_end': date(20), 'session_key': 123})
+    sys.modules['openf1_data'].get_source_access_status = status
+    sys.modules['openf1_data'].fetched_at = stamp
+    monkeypatch.setattr('web_replay.CACHE', tmp_path)
+    payload = load_browser_replay(2026, 1, 'R')
+    for calls in (status_calls, stamp_calls):
+        assert ('sessions', {'year': 2026}) in calls
+        assert ('session_result', {'session_key': 123}) in calls
+        assert not any(endpoint == 'sessions' and 'session_key' in params for endpoint, params in calls)
+    assert payload['metadata']['access_limited_feeds'] == ['sessions']
+    assert payload['metadata']['access_reason'] == 'live_access_restricted'
+    assert 'past sessions' in payload['metadata']['access_message']
+    assert payload['metadata']['source_retrieved_utc'] == '2026-03-08T06:00:10+02:00'
+    assert payload['metadata']['feed_retrieved_utc']['sessions'] == '2026-03-08T06:00:10+02:00'

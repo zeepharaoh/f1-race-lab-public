@@ -1,5 +1,8 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 import json
+import os
+import threading
 from types import SimpleNamespace
 import time
 
@@ -56,7 +59,7 @@ def feeds(monkeypatch):
     monkeypatch.setattr(api, 'fetch', fetch)
     monkeypatch.setattr(api, 'resolve_session', lambda *args, **kwargs: {
         'round': 9, 'race': 'Example Grand Prix', 'session_utc': start.tz_convert('Europe/Stockholm')})
-    monkeypatch.setattr(api, '_FETCHED_AT', {})
+    monkeypatch.setattr(api, '_READ_STATE', threading.local())
     return values, calls
 
 
@@ -229,7 +232,7 @@ class Response:
 
 @pytest.fixture
 def network(monkeypatch, tmp_path):
-    clock = {'now': 0, 'starts': [], 'waits': []}
+    clock = {'now': 0, 'starts': [], 'waits': [], 'requests': []}
     def sleep(seconds):
         clock['waits'].append(seconds)
         clock['now'] += seconds
@@ -237,10 +240,15 @@ def network(monkeypatch, tmp_path):
                         monotonic=lambda: clock['now'], sleep=sleep))
     monkeypatch.setattr(api, 'ROOT', tmp_path)
     monkeypatch.setattr(api, '_LAST_REQUEST', None)
-    monkeypatch.setattr(api, '_FETCHED_AT', {})
+    monkeypatch.setattr(api, '_READ_STATE', threading.local())
+    monkeypatch.setattr(api, '_ACCESS_BLOCKED_UNTIL', 0)
+    monkeypatch.setattr(api, '_ACCESS_TOKEN_KEY', None)
+    monkeypatch.setattr(api, '_ACCESS_REASON', None)
+    monkeypatch.delenv('OPENF1_ACCESS_TOKEN', raising=False)
     responses = []
     def get(url, **kwargs):
         clock['starts'].append(clock['now'])
+        clock['requests'].append((url, kwargs))
         return responses.pop(0)
     monkeypatch.setattr(api.requests, 'get', get)
     return clock, responses, tmp_path
@@ -288,3 +296,177 @@ def test_fetch_rejects_oversized_or_wrong_shape_json(network, monkeypatch):
     monkeypatch.setattr(api, 'MAX_RESPONSE_BYTES', 16)
     with pytest.raises(ValueError, match='too large'):
         api.fetch('laps', session_key=900)
+
+
+LIVE_DENIAL = {'detail': 'Live F1 session in progress. Global API access (including past sessions) '
+               'is restricted to authenticated users until the session ends.'}
+
+
+def test_401_without_cache_is_typed_safe_and_stops_following_requests(network):
+    clock, responses, _ = network
+    responses.append(Response(LIVE_DENIAL, 401))
+    with pytest.raises(api.OpenF1AccessError, match='including past sessions') as error:
+        api.fetch('sessions', year=2026, refresh=True)
+    assert error.value.access_reason == 'live_access_restricted'
+    assert error.value.retry_after == 60
+    assert api.get_source_access_status('sessions', year=2026)['state'] == 'access_limited'
+    with pytest.raises(api.OpenF1AccessError):
+        api.fetch('laps', session_key=900, refresh=True)
+    assert len(clock['starts']) == 1 and clock['waits'] == []
+    assert api.get_source_access_status()['retry_after'] == 60
+
+
+def test_401_generic_body_does_not_claim_a_live_session_or_expose_details(network):
+    _, responses, _ = network
+    responses.append(Response({'detail': 'private credential value'}, 401))
+    with pytest.raises(api.OpenF1AccessError, match='HTTP 401') as error:
+        api.fetch('laps', session_key=900)
+    assert error.value.access_reason == 'unauthorized'
+    assert 'private credential' not in str(error.value)
+    status = api.source_access_status('laps', session_key=900)
+    assert status['access_reason'] == 'unauthorized'
+    assert 'private credential' not in json.dumps(status)
+
+
+def test_denied_refresh_uses_expired_saved_rows_without_rewriting_the_timestamp(network):
+    clock, responses, root = network
+    responses.extend([Response([{'lap_number': 1}]), Response(LIVE_DENIAL, 401)])
+    assert api.fetch('laps', session_key=900) == [{'lap_number': 1}]
+    retrieved = api.fetched_at('laps', session_key=900)
+    path = next(root.glob('cache/openf1/*.json'))
+    os.utime(path, (0, 0))
+    content = path.read_bytes()
+    assert api.fetch('laps', session_key=900, refresh=True) == [{'lap_number': 1}]
+    assert api.fetched_at('laps', session_key=900) == retrieved
+    assert path.read_bytes() == content and path.stat().st_mtime == 0
+    status = api.get_source_access_status('laps', session_key=900)
+    assert status['state'] == 'access_limited_cache'
+    assert status['access_limited'] and status['cached_fallback']
+    assert status['source_retrieved_utc'] == retrieved
+    assert api.fetch('laps', session_key=900, refresh=True) == [{'lap_number': 1}]
+    assert len(clock['starts']) == 2
+
+
+@pytest.mark.parametrize('saved', [
+    {'data': [], 'retrieved_utc': '2026-01-01T00:00:00+00:00'},
+    {'data': {'invalid': 'object'}, 'retrieved_utc': '2026-01-01T00:00:00+00:00'},
+    {'data': [42], 'retrieved_utc': '2026-01-01T00:00:00+00:00'},
+    {'data': [{'lap_number': 1}], 'retrieved_utc': 'not a date'},
+    {'data': [{'lap_number': 1}], 'retrieved_utc': '2026-01-01T00:00:00'},
+    {'data': [{'lap_number': 1}], 'retrieved_utc': '2099-01-01T00:00:00+00:00'},
+])
+def test_denial_does_not_fall_back_to_invalid_or_empty_saved_response(network, saved):
+    clock, responses, root = network
+    path = root / 'cache' / 'openf1' / f'{api._key("laps", {"session_key": 900})}.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(saved))
+    responses.append(Response(LIVE_DENIAL, 401))
+    with pytest.raises(api.OpenF1AccessError):
+        api.fetch('laps', session_key=900, refresh=True)
+    assert api.get_source_access_status('laps', session_key=900)['cached_fallback'] is False
+    assert api.fetched_at('laps', session_key=900) is None
+
+
+def test_access_guard_expires_and_a_success_clears_denial(network):
+    clock, responses, _ = network
+    responses.extend([Response(LIVE_DENIAL, 401), Response([{'lap_number': 1}])])
+    with pytest.raises(api.OpenF1AccessError):
+        api.fetch('laps', session_key=900)
+    clock['now'] = 60
+    assert api.fetch('laps', session_key=900) == [{'lap_number': 1}]
+    assert clock['starts'] == [0, 60]
+    assert not api.get_source_access_status()['access_limited']
+    assert api.get_source_access_status('laps', session_key=900)['state'] == 'network'
+
+
+def test_optional_server_token_is_only_sent_in_authorization_header(network, monkeypatch):
+    clock, responses, root = network
+    responses.extend([Response(LIVE_DENIAL, 401), Response([{'lap_number': 1}])])
+    with pytest.raises(api.OpenF1AccessError):
+        api.fetch('laps', session_key=900)
+    monkeypatch.setenv('OPENF1_ACCESS_TOKEN', 'example.test.token')
+    assert api.fetch('laps', session_key=900) == [{'lap_number': 1}]
+    url, kwargs = clock['requests'][-1]
+    assert kwargs['headers'] == {'Authorization': 'Bearer example.test.token'}
+    assert kwargs['params'] == {'session_key': 900}
+    assert 'example.test.token' not in url
+    assert 'example.test.token' not in json.dumps(api.get_source_access_status('laps', session_key=900))
+    assert 'example.test.token' not in next(root.glob('cache/openf1/*.json')).read_text()
+    assert next(root.glob('cache/openf1/*.json')).name == f'{api._key("laps", {"session_key": 900})}.json'
+
+
+def test_invalid_token_header_value_is_rejected_without_network_or_secret_echo(network, monkeypatch):
+    clock, _, _ = network
+    monkeypatch.setenv('OPENF1_ACCESS_TOKEN', 'private\ncredential')
+    with pytest.raises(api.OpenF1AccessError, match='configured OpenF1 access token is invalid') as error:
+        api.fetch('laps', session_key=900)
+    assert 'private' not in str(error.value) and clock['starts'] == []
+
+
+def test_optional_feeds_propagate_access_denial_and_stop_remaining_requests(feeds):
+    values, calls = feeds
+    values['stints'] = api.OpenF1AccessError(reason='live_access_restricted')
+    with pytest.raises(api.OpenF1AccessError):
+        api.load_openf1_analysis(2026, 9, 'Q')
+    assert calls[-1][0] == 'stints'
+    assert not any(name in ('pit', 'race_control') for name, _ in calls)
+
+
+def test_analysis_marks_only_its_own_cached_fallback_and_preserves_retrieval_time(feeds):
+    api._record_status(api._key('sessions', {'year': 2026}), 'access_limited_cache',
+                       '2026-10-11T00:00:00+00:00', 'live_access_restricted')
+    analysis = api.load_openf1_analysis(2026, 9, 'Q')
+    metadata = analysis['metadata']
+    assert metadata['access_limited'] and metadata['cached_fallback']
+    assert metadata['access_reason'] == 'live_access_restricted'
+    assert metadata['source_retrieved_utc'] == '2026-10-11T00:00:00+00:00'
+    assert metadata['retrieved_utc'] != metadata['loaded_utc']
+    api._read_statuses().clear()
+    api._record_status(api._key('laps', {'session_key': 999}), 'access_limited_cache',
+                       '2026-10-11T00:00:00+00:00', 'live_access_restricted')
+    other = api.load_openf1_analysis(2026, 9, 'Q')['metadata']
+    assert not other['access_limited'] and not other['cached_fallback']
+    assert other['access_message'] is None
+
+
+def test_cached_session_index_does_not_allow_a_future_session(feeds):
+    values, calls = feeds
+    values['sessions'][0]['date_end'] = '2099-01-01T00:00:00Z'
+    api._record_status(api._key('sessions', {'year': 2026}), 'access_limited_cache',
+                       '2026-10-11T00:00:00+00:00', 'live_access_restricted')
+    with pytest.raises(api.SessionUnavailableError, match='not finished'):
+        api.resolve_openf1_session(2026, 9, 'Q', refresh=True)
+    assert [name for name, _ in calls] == ['sessions']
+
+
+def test_concurrent_reads_keep_their_own_status_and_retrieval_time(network):
+    clock, responses, _ = network
+    responses.extend([Response([{'lap_number': 1}]), Response([{'lap_number': 2}]),
+                      Response(LIVE_DENIAL, 401)])
+    first_read, second_read = threading.Event(), threading.Event()
+    def first():
+        rows = api.fetch('laps', session_key=900)
+        retrieved = api.fetched_at('laps', session_key=900)
+        first_read.set()
+        assert second_read.wait(3)
+        return rows, retrieved, api.fetched_at('laps', session_key=900), api.get_source_access_status('laps', session_key=900)
+    def second():
+        assert first_read.wait(3)
+        try:
+            api.fetch('laps', session_key=900, refresh=True)
+            rows = api.fetch('laps', session_key=900, refresh=True)
+            return rows, api.fetched_at('laps', session_key=900), api.get_source_access_status('laps', session_key=900)
+        finally:
+            second_read.set()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a, b = pool.submit(first), pool.submit(second)
+        first_rows, original, final, first_status = a.result(timeout=5)
+        second_rows, second_stamp, second_status = b.result(timeout=5)
+    assert first_rows == [{'lap_number': 1}] and second_rows == [{'lap_number': 2}]
+    assert first_status['state'] == 'network'
+    assert second_status['state'] == 'access_limited_cache'
+    assert original == final == first_status['source_retrieved_utc']
+    assert second_stamp == second_status['source_retrieved_utc'] and second_stamp != original
+    assert api.get_source_access_status('laps', session_key=900) == {}
+    assert api.fetched_at('laps', session_key=900) is None
+    assert len(clock['starts']) == 3

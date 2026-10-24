@@ -14,6 +14,8 @@ Open [F1 Race Lab online](https://f1racelab.streamlit.app/) in a browser with no
 
 Online timing and replay use [OpenF1 historical data](https://openf1.org/docs/), avoiding the direct timing feed that rejects requests from some cloud hosts. Practice, qualifying, Sprint qualifying, Sprint and Grand Prix sessions are supported after their results and recordings are published. This is recorded analysis rather than a live race feed. Missing source data stays visible as unavailable.
 
+OpenF1 can return **401** during a live session and restrict all unauthenticated requests, including requests for older sessions. Previously saved completed session timing and replays remain available when present, with a warning and their original source retrieval time. A session that has not been saved must wait until access resumes. Championship results use Jolpica and are independent of this restriction.
+
 Initial replay downloads can take several minutes. Prepared replays are shared between viewers and playback then runs in the browser. Your computer does not need to stay on for colleagues to use the app.
 
 ## Host the dashboard
@@ -28,9 +30,15 @@ Deploy the public repository with [Streamlit Community Cloud](https://share.stre
 | Python version | `3.12` |
 | Visibility | Public |
 
-Choose an available app URL and deploy. Share the resulting address with viewers. Streamlit installs `requirements.txt` automatically; no secrets or replay engine installation are needed. The hosting account needs repository access; viewers of a public app do not need to install Python or clone the repository.
+Choose an available app URL and deploy. Share the resulting address with viewers. Streamlit installs `requirements.txt` automatically; the public historical API does not normally require credentials, and no replay engine installation is needed. The hosting account needs repository access; viewers of a public app do not need to install Python or clone the repository.
 
 The hosted server checks for published data every 15 minutes while a visitor has the dashboard open. Manual refresh requests are shared and limited to one per minute. Session caches hold at most 12 analyses and replay caches hold three prepared payloads in memory. Source requests share a paced queue to respect the OpenF1 request limit. Cached data is temporary, so a server restart can require fresh downloads. A sleeping app can take time to wake. See the [hosting guide](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/deploy) and [app limits](https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app).
+
+### Optional OpenF1 authentication
+
+The app owner can configure a valid OpenF1 access token through the server environment variable `OPENF1_ACCESS_TOKEN`. The server sends it as a Bearer token to OpenF1. Keep it in the hosting platform's secret settings or a private environment, never in source files or Git. Viewers do not enter credentials.
+
+Authentication requires access granted by OpenF1. This project does not include a subscription or create one. OpenF1 access tokens expire after one hour; this app does not renew them. An invalid or expired token still produces an access message. See the [OpenF1 authentication guide](https://openf1.org/auth.html). Without a token, historical downloads work when OpenF1 allows public access. See the [OpenF1 access policy](https://openf1.org/).
 
 ## Installation
 
@@ -233,6 +241,7 @@ Replay supports published 2026 sessions. `--session` accepts `FP1`, `FP2`, `FP3`
 | `Replay environment missing` | Check the engine folder, then run `sh setup.sh`. |
 | Replay cannot find a display | Start the app from a desktop terminal or launcher. |
 | Driver cards are missing | Click a driver on the replay leaderboard. Hold Shift and click others to compare; enlarge the window for more cards. |
+| OpenF1 access is restricted or returns 401 | Retry after the live session access window ends. Saved data is shown when available. The app owner may configure valid OpenF1 access on the server. Refreshing repeatedly does not remove the restriction. |
 | Lap chart is empty | Click **Load lap analysis** and select drivers and tyres with available clean laps. |
 
 Dashboard-launched replay logs are saved to `outputs/replay.log`.

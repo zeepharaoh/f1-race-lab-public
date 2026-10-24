@@ -4,6 +4,7 @@ from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import threading
@@ -22,7 +23,94 @@ MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_CACHE_BYTES = 192 * 1024 * 1024
 _LOCK = threading.Lock()
 _LAST_REQUEST = None
-_FETCHED_AT = {}
+_READ_STATE = threading.local()
+_ACCESS_BLOCKED_UNTIL = 0
+_ACCESS_TOKEN_KEY = None
+_ACCESS_REASON = None
+ACCESS_RETRY_SECONDS = 60
+
+
+class OpenF1AccessError(SessionUnavailableError):
+    """A provider access denial with no response or credential details."""
+
+    def __init__(self, message=None, *, reason='unauthorized', retry_after=ACCESS_RETRY_SECONDS):
+        super().__init__(message or _access_message(reason))
+        self.access_reason = reason
+        self.retry_after = retry_after
+
+
+def _access_message(reason):
+    if reason == 'live_access_restricted':
+        return ('OpenF1 temporarily restricts its API, including past sessions, during a live session. '
+                'Try again after the live access window. An existing server access token can also be used.')
+    return ('OpenF1 denied access (HTTP 401). Try again later, or check the server access token '
+            'if one is configured.')
+
+
+def _denial_reason(response):
+    try:
+        content = bytearray()
+        for chunk in response.iter_content(4096):
+            if len(content) + len(chunk) > 8192:
+                return 'unauthorized'
+            content.extend(chunk)
+        detail = json.loads(content).get('detail', '')
+        if (isinstance(detail, str) and 'live f1 session in progress' in detail.lower()
+                and 'global api access' in detail.lower()):
+            return 'live_access_restricted'
+    except (ValueError, AttributeError, TypeError, requests.RequestException):
+        pass
+    return 'unauthorized'
+
+
+def _saved_response(path):
+    try:
+        if path.stat().st_size > MAX_RESPONSE_BYTES + 4096:
+            return None
+        saved = json.loads(path.read_text(), parse_constant=_invalid_json_number)
+        rows, retrieved = saved['data'], saved['retrieved_utc']
+        if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+            return None
+        timestamp = datetime.fromisoformat(retrieved.replace('Z', '+00:00'))
+        if timestamp.tzinfo is None or timestamp > datetime.now(timezone.utc):
+            return None
+        return rows, retrieved, time.time() - path.stat().st_mtime
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _invalid_json_number(value):
+    raise ValueError('Invalid JSON number')
+
+
+def _record_status(key, state, retrieved=None, reason=None):
+    _read_statuses()[key] = {
+        'state': state, 'access_limited': state.startswith('access_limited'),
+        'cached_fallback': state == 'access_limited_cache',
+        'source_retrieved_utc': retrieved, 'access_reason': reason,
+        'access_message': _access_message(reason) if reason else None,
+    }
+
+
+def _read_statuses():
+    if not hasattr(_READ_STATE, 'statuses'):
+        _READ_STATE.statuses = {}
+    return _READ_STATE.statuses
+
+
+def get_source_access_status(endpoint=None, **params):
+    """Return this thread's last query read, or the current shared denial guard."""
+    if endpoint is not None:
+        key = _key(endpoint, {key: value for key, value in params.items() if value is not None})
+        return dict(_read_statuses().get(key, {}))
+    with _LOCK:
+        remaining = max(0, math.ceil(_ACCESS_BLOCKED_UNTIL - time.monotonic()))
+        return {'access_limited': bool(remaining), 'retry_after': remaining,
+                'access_reason': _ACCESS_REASON if remaining else None,
+                'access_message': _access_message(_ACCESS_REASON) if remaining else None}
+
+
+source_access_status = get_source_access_status
 
 
 def _key(endpoint, params):
@@ -42,7 +130,7 @@ def _retry_wait(value, attempt):
 
 def fetch(endpoint, *, refresh=False, **params):
     """Cache bounded JSON responses and share a paced request queue."""
-    global _LAST_REQUEST
+    global _LAST_REQUEST, _ACCESS_BLOCKED_UNTIL, _ACCESS_TOKEN_KEY, _ACCESS_REASON
     if not re.fullmatch(r'[a-z_]+', endpoint):
         raise ValueError('Invalid OpenF1 endpoint')
     params = {key: value for key, value in params.items() if value is not None}
@@ -51,19 +139,39 @@ def fetch(endpoint, *, refresh=False, **params):
     path = cache / f'{key}.json'
     ttl = 900 if endpoint in ('sessions', 'meetings') else CACHE_TTL
     with _LOCK:
-        if path.exists() and not refresh:
-            try:
-                saved = json.loads(path.read_text())
-                if time.time() - path.stat().st_mtime < ttl and saved['data']:
-                    _FETCHED_AT[key] = saved['retrieved_utc']
-                    return saved['data']
-            except (ValueError, KeyError, OSError):
-                pass
+        token = os.environ.get('OPENF1_ACCESS_TOKEN', '').strip()
+        if any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in token):
+            raise OpenF1AccessError('The configured OpenF1 access token is invalid.')
+        token_key = hashlib.sha256(token.encode()).digest()
+        if token_key != _ACCESS_TOKEN_KEY:
+            _ACCESS_BLOCKED_UNTIL, _ACCESS_REASON = 0, None
+            _ACCESS_TOKEN_KEY = token_key
+        _record_status(key, 'unavailable')
+        saved = _saved_response(path)
+        limited = time.monotonic() < _ACCESS_BLOCKED_UNTIL
+        if saved and (limited or (not refresh and saved[2] < ttl)):
+            _record_status(key, 'access_limited_cache' if limited else 'cache', saved[1],
+                           _ACCESS_REASON if limited else None)
+            return saved[0]
+        if limited:
+            _record_status(key, 'access_limited', reason=_ACCESS_REASON)
+            raise OpenF1AccessError(reason=_ACCESS_REASON,
+                                    retry_after=math.ceil(_ACCESS_BLOCKED_UNTIL - time.monotonic()))
+        headers = {'Authorization': f'Bearer {token}'} if token else {}
         for attempt in range(3):
             if _LAST_REQUEST is not None:
                 time.sleep(max(0, REQUEST_INTERVAL - (time.monotonic() - _LAST_REQUEST)))
             _LAST_REQUEST = time.monotonic()
-            with requests.get(f'{BASE}/{endpoint}', params=params, timeout=(10, 45), stream=True) as response:
+            with requests.get(f'{BASE}/{endpoint}', params=params, headers=headers,
+                              timeout=(10, 45), stream=True) as response:
+                if response.status_code == 401:
+                    _ACCESS_REASON = _denial_reason(response)
+                    _ACCESS_BLOCKED_UNTIL = time.monotonic() + ACCESS_RETRY_SECONDS
+                    _record_status(key, 'access_limited_cache' if saved else 'access_limited',
+                                   saved[1] if saved else None, _ACCESS_REASON)
+                    if saved:
+                        return saved[0]
+                    raise OpenF1AccessError(reason=_ACCESS_REASON) from None
                 if response.status_code == 429 and attempt < 2:
                     wait = _retry_wait(response.headers.get('Retry-After'), attempt)
                     if wait > 30:
@@ -81,7 +189,8 @@ def fetch(endpoint, *, refresh=False, **params):
             if not isinstance(payload, list) or any(not isinstance(row, dict) for row in payload):
                 raise ValueError('Unexpected OpenF1 response')
             retrieved = datetime.now(timezone.utc).isoformat()
-            _FETCHED_AT[key] = retrieved
+            _ACCESS_BLOCKED_UNTIL, _ACCESS_REASON = 0, None
+            _record_status(key, 'network', retrieved)
             if payload:
                 try:
                     cache.mkdir(parents=True, exist_ok=True)
@@ -108,7 +217,7 @@ def _utc(value):
 
 def fetched_at(endpoint, **params):
     """Return the source retrieval time, including disk cache hits."""
-    return _FETCHED_AT.get(_key(endpoint, {key: value for key, value in params.items() if value is not None}))
+    return get_source_access_status(endpoint, **params).get('source_retrieved_utc')
 
 
 def resolve_openf1_session(year, round_number, session_code, *, refresh=False):
@@ -363,6 +472,8 @@ def load_openf1_analysis(year, round_number, session_code, *, refresh=False):
     def optional(endpoint):
         try:
             return fetch(endpoint, session_key=key, refresh=refresh)
+        except OpenF1AccessError:
+            raise
         except (requests.RequestException, ValueError):
             missing.append(endpoint)
             return []
@@ -379,9 +490,17 @@ def load_openf1_analysis(year, round_number, session_code, *, refresh=False):
         keep &= False
     results = _results(info['_results'], drivers, grid, laps, code)
     loaded = datetime.now(timezone.utc).isoformat()
-    source_times = [_FETCHED_AT.get(_key(endpoint, {'session_key': key}))
-                    for endpoint in ('session_result', 'drivers', 'laps', 'stints', 'pit', 'race_control')]
+    endpoints = ['session_result', 'drivers', 'laps', 'stints', 'pit', 'race_control']
+    if code in ('R', 'S'):
+        endpoints.append('starting_grid')
+    queries = [('sessions', {'year': int(year)})] + [(endpoint, {'session_key': key}) for endpoint in endpoints]
+    statuses = [get_source_access_status(endpoint, **params) for endpoint, params in queries]
+    source_times = [fetched_at(endpoint, **params) for endpoint, params in queries]
     retrieved = min((value for value in source_times if value), default=loaded)
+    limited = [status for status in statuses if status.get('access_limited')]
+    reason = ('live_access_restricted' if any(status.get('access_reason') == 'live_access_restricted'
+                                            for status in limited)
+              else limited[0].get('access_reason', 'unauthorized') if limited else None)
     note = ('OpenF1 lap comparisons use published lap and sector times, pit flags, race control flags '
             'and identifiable lap deletions. FastF1 accuracy flags and exact pit entry or exit times '
             'are not supplied. Points are not supplied by this classification source.')
@@ -395,6 +514,9 @@ def load_openf1_analysis(year, round_number, session_code, *, refresh=False):
                          'source_url': f'{BASE}/sessions?session_key={key}',
                          'loaded_utc': loaded, 'retrieved_utc': retrieved,
                          'source_retrieved_utc': retrieved,
+                         'access_limited': bool(limited),
+                         'cached_fallback': any(status.get('cached_fallback') for status in statuses),
+                         'access_reason': reason, 'access_message': _access_message(reason) if reason else None,
                          'refresh_requested': bool(refresh), 'timing_status': 'Published session results',
                          'is_complete': True, 'classification_kind': 'Published session classification',
                          'has_results': bool(results.position.notna().any()),

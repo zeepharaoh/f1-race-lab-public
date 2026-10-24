@@ -319,19 +319,103 @@ def build_browser_replay(session, drivers, laps, locations, *, positions=(), int
             'unavailable': unavailable}
 
 
+def _finite_json_number(value):
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError('Invalid JSON number')
+    return number
+
+
+def _retrieval_timestamp(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None or timestamp > datetime.now(timezone.utc):
+            return None
+        return timestamp
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _cached_completed_replay(path, year, round_number, code):
+    try:
+        with gzip.open(path, 'rt', encoding='utf-8') as source:
+            payload = json.load(source, parse_constant=_finite_json_number, parse_float=_finite_json_number)
+        metadata = payload['metadata']
+        start, end = _epoch(metadata.get('start_utc')), _epoch(metadata.get('end_utc'))
+        matches = (metadata.get('schema_version') == SCHEMA_VERSION
+                   and metadata.get('year') == int(year) and metadata.get('round') == int(round_number)
+                   and metadata.get('session_code') == code and metadata.get('is_live') is False)
+        if not matches or start is None or end is None or not start < end <= datetime.now(timezone.utc).timestamp():
+            return None
+        retrieved = _retrieval_timestamp(metadata.get('retrieved_utc'))
+        if retrieved is None or end > retrieved.timestamp():
+            return None
+        source_stamp = metadata.get('source_retrieved_utc')
+        source_time = _retrieval_timestamp(source_stamp) if source_stamp is not None else None
+        if source_stamp is not None and (source_time is None or source_time > retrieved):
+            return None
+        feeds = metadata.get('feed_retrieved_utc', {})
+        if not isinstance(feeds, dict):
+            return None
+        for stamp in feeds.values():
+            timestamp = _retrieval_timestamp(stamp)
+            if timestamp is None or timestamp > retrieved or (source_time is not None and source_time > timestamp):
+                return None
+        times, cars = payload['times'], payload['cars']
+        if not isinstance(times, list) or not times or not isinstance(cars, dict) or not cars:
+            return None
+        if not isinstance(payload.get('drivers'), list) or not payload['drivers']:
+            return None
+        if any(not isinstance(car, dict) or any(not isinstance(values, list) or len(values) != len(times)
+                                               for values in car.values())
+               or len(car.get('x', [])) != len(times) or len(car.get('y', [])) != len(times)
+               for car in cars.values()):
+            return None
+        if not any(value is not None for car in cars.values() for value in car['x']):
+            return None
+        return payload
+    except (OSError, EOFError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _access_limited_replay(payload, *, completed=False, reason=None, message=None):
+    metadata = payload['metadata']
+    metadata.update(access_limited=True, cached_fallback=True)
+    if reason is not None:
+        metadata['access_reason'] = reason
+    if message is not None:
+        metadata['access_message'] = message
+    warning = ('OpenF1 access is restricted. Showing a previously saved completed replay.' if completed else
+               'OpenF1 access is restricted. This replay uses saved source data.')
+    metadata['warnings'] = list(dict.fromkeys([*metadata.get('warnings', []), warning]))
+    return payload
+
+
 def load_browser_replay(year, round_number, session_code, *, refresh=False):
-    from openf1_data import fetch, fetched_at, resolve_openf1_session
+    from openf1_data import OpenF1AccessError
     code = str(session_code).upper()
     cache_file = CACHE / f'{int(year)}_{int(round_number)}_{code}_v{SCHEMA_VERSION}.json.gz'
-    if not refresh and cache_file.exists():
-        try:
-            with gzip.open(cache_file, 'rt', encoding='utf-8') as source:
-                cached = json.load(source)
-            ttl = 60 if cached.get('metadata', {}).get('warnings') else 3600
+    if not refresh and cache_file.exists() and time.time() - cache_file.stat().st_mtime < 3600:
+        cached = _cached_completed_replay(cache_file, year, round_number, code)
+        if cached is not None:
+            ttl = 60 if cached['metadata'].get('warnings') or cached['metadata'].get('access_limited') else 3600
             if time.time() - cache_file.stat().st_mtime < ttl:
                 return cached
-        except (OSError, ValueError):
-            pass
+        del cached
+    try:
+        return _load_browser_replay(year, round_number, code, cache_file, refresh=refresh)
+    except OpenF1AccessError as error:
+        cached = _cached_completed_replay(cache_file, year, round_number, code)
+        if cached is None:
+            raise
+        return _access_limited_replay(cached, completed=True, reason=getattr(error, 'access_reason', None),
+                                      message=str(error))
+
+
+def _load_browser_replay(year, round_number, code, cache_file, *, refresh=False):
+    from openf1_data import OpenF1AccessError, fetch, fetched_at, get_source_access_status, resolve_openf1_session
     session = resolve_openf1_session(year, round_number, code, refresh=refresh)
     session = {**session, 'year': int(year), 'round': int(round_number), 'code': code}
     end = _epoch(session.get('date_end'))
@@ -341,17 +425,29 @@ def load_browser_replay(year, round_number, session_code, *, refresh=False):
     warnings = []
     source_stamps = []
     feed_stamps = {}
-    def recorded(endpoint, **params):
-        rows = fetch(endpoint, session_key=key, refresh=refresh, **params)
-        stamp = fetched_at(endpoint, session_key=key, **params)
+    limited_feeds = set()
+    limited_statuses = []
+    def remember(endpoint, **params):
+        status = get_source_access_status(endpoint, **params)
+        if status.get('access_limited'):
+            limited_feeds.add(endpoint)
+            limited_statuses.append(status)
+        stamp = fetched_at(endpoint, **params)
         if stamp is not None:
             source_stamps.append(stamp)
-            if endpoint not in feed_stamps or stamp < feed_stamps[endpoint]:
+            if endpoint not in feed_stamps or _epoch(stamp) < _epoch(feed_stamps[endpoint]):
                 feed_stamps[endpoint] = stamp
+    remember('sessions', year=int(year))
+    remember('session_result', session_key=int(key))
+    def recorded(endpoint, **params):
+        rows = fetch(endpoint, session_key=key, refresh=refresh, **params)
+        remember(endpoint, session_key=key, **params)
         return rows
     def optional(endpoint, **params):
         try:
             return recorded(endpoint, **params), True
+        except OpenF1AccessError:
+            raise
         except (requests.RequestException, ValueError) as error:
             warnings.append(f'{endpoint} feed unavailable ({type(error).__name__}).')
             return [], False
@@ -381,8 +477,14 @@ def load_browser_replay(year, round_number, session_code, *, refresh=False):
         intervals=feeds.get('intervals', []), stints=feeds['stints'], pit=feeds['pit'],
         car_data=telemetry, weather=feeds['weather'], race_control=feeds['race_control'],
         warnings=warnings, pit_available=availability['pit'])
-    payload['metadata']['source_retrieved_utc'] = min(source_stamps) if source_stamps else None
+    payload['metadata']['source_retrieved_utc'] = min(source_stamps, key=_epoch) if source_stamps else None
     payload['metadata']['feed_retrieved_utc'] = feed_stamps
+    if limited_feeds:
+        status = next((item for item in limited_statuses if item.get('access_reason') == 'live_access_restricted'),
+                      limited_statuses[0])
+        payload = _access_limited_replay(payload, reason=status.get('access_reason'),
+                                         message=status.get('access_message'))
+        payload['metadata']['access_limited_feeds'] = sorted(limited_feeds)
     try:
         CACHE.mkdir(parents=True, exist_ok=True)
         temporary = cache_file.with_suffix('.tmp')

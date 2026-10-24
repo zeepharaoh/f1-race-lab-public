@@ -87,6 +87,20 @@ def choose_session(schedule, key):
     return int(selected_round), code, has_started
 
 
+def source_access_notice(metadata):
+    if metadata.get('access_limited') and metadata.get('cached_fallback'):
+        message = metadata.get('access_message') or 'OpenF1 access is temporarily unavailable.'
+        st.warning(f'{message} Showing saved data for this session.')
+
+
+def source_caption(metadata, default='FastF1 session data'):
+    source_access_notice(metadata)
+    retrieved = metadata.get('source_retrieved_utc') or metadata.get('retrieved_utc')
+    if retrieved:
+        stamp = retrieved[:16].replace('T', ' ')
+        st.caption(f'{metadata.get("source", default)} · source retrieved {stamp} UTC')
+
+
 def session_results(analysis, teams, scope, season=None):
     results = analysis['results']
     metadata = analysis['metadata']
@@ -105,7 +119,7 @@ def session_results(analysis, teams, scope, season=None):
     if view.empty:
         st.info('No session drivers match the comparison scope.')
         return
-    st.caption(f'{metadata.get("source", "FastF1 session data")} · loaded {metadata.get("loaded_utc", metadata["retrieved_utc"])[:16].replace("T", " ")} UTC')
+    source_caption(metadata)
     if metadata.get('quality_note'):
         st.caption(metadata['quality_note'])
     if official_points:
@@ -365,7 +379,7 @@ def app():
                 except Exception:
                     st.warning('Lap refresh is unavailable. Showing the last loaded timing.')
                 metadata = loaded[1]['metadata']
-                st.caption(f'{metadata.get("source", "FastF1 timing")} · loaded {metadata.get("loaded_utc", metadata["retrieved_utc"])[:16].replace("T", " ")} UTC')
+                source_caption(metadata, 'FastF1 timing')
                 if metadata.get('quality_note'):
                     st.caption(metadata['quality_note'])
                 laps = loaded[1]['clean_laps']
@@ -414,8 +428,9 @@ def app():
                     visible_drivers = [driver for driver in payload['drivers']
                                        if shown_teams is None or driver['team'] in shown_teams]
                     if visible_drivers:
+                        source_caption(payload['metadata'], 'OpenF1')
                         st.iframe(replay_html(payload, shown_teams), height='content', alt='Animated session replay')
-                        st.caption(f'{payload["metadata"].get("source", "OpenF1")} · recorded car positions · prepared {payload["metadata"]["retrieved_utc"][:16].replace("T", " ")} UTC')
+                        st.caption('Recorded car positions and telemetry. Playback follows the saved session timeline.')
                         if payload.get('unavailable'):
                             st.caption('Position data is unavailable for: ' + ', '.join(payload['unavailable']))
                     else:
@@ -480,6 +495,7 @@ def app():
         st.write('Championship results: Jolpica F1 API. Weekend schedule and local session analysis: FastF1. Online session analysis and browser replay: OpenF1 historical data. Refresh checks run every 15 minutes while the app is open. Completed sessions appear after the source publishes them.')
         st.markdown('[FastF1 session data and schedule](https://docs.fastf1.dev/)')
         st.markdown('[OpenF1 timing, positions and telemetry](https://openf1.org/docs/)')
+        st.caption('OpenF1 can restrict all unauthenticated requests during a live session, including older sessions. Saved completed session data remains available when present. New downloads can resume after the restriction ends.')
         st.caption('Session timing and classifications may be derived by FastF1. Championship point reconciliation below uses Grand Prix and Sprint results from Jolpica.')
         if season is not None:
             st.dataframe(season['reconciliation'], hide_index=True, width='stretch')
