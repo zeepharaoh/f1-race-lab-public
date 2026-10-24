@@ -371,3 +371,59 @@ def test_missing_session_fingerprint_preserves_revision_fallback(monkeypatch, tm
     monkeypatch.setattr('archive_replay.CACHE', tmp_path)
     load_archive_replay(2026, 1, 'R', refresh=True)
     assert calls == ['rebuilt']
+
+
+def test_archive_practice_lap_timing_uses_completed_valid_laps_without_green_flag_requirement():
+    info = archive(laps=3, code='FP3')
+    info['lap_columns']['status'] = ['2', '1', '1']
+    info['lap_columns']['del'][1] = True
+    info['lap_columns']['iacc'][2] = False
+    timing = build(info, code='FP3')['lap_timing']
+    assert timing['available']
+    assert timing['records'] == [
+        {'code': 'AAA', 'lap': 1, 'end': 20, 'time': 20, 'segment': None, 'valid': True},
+        {'code': 'AAA', 'lap': 2, 'end': 40, 'time': 20, 'segment': None, 'valid': False},
+        {'code': 'AAA', 'lap': 3, 'end': 60, 'time': 20, 'segment': None, 'valid': False}]
+    assert timing['segments'] == []
+
+
+def test_archive_qualifying_uses_explicit_q_labels_and_pit_exit_coverage():
+    info = archive(laps=6, code='Q')
+    info['lap_columns']['qs'] = ['Q1', 'Q1', 'Q2', 'Q2', 'Q3', 'Q3']
+    info['lap_columns']['pout'][2] = 155
+    timing = build(info, code='Q')['lap_timing']
+    assert timing['segments'] == [{'segment': 1, 'start': 0, 'end': 40},
+                                  {'segment': 2, 'start': 55, 'end': 80},
+                                  {'segment': 3, 'start': 80, 'end': 120}]
+    assert timing['records'][2]['valid'] is False
+    assert timing['records'][3]['segment'] == 2
+    assert 'recorded labelled laps' in timing['note']
+
+
+def test_archive_saved_replay_gains_timing_without_fetching_telemetry(monkeypatch, tmp_path):
+    info = archive(code='FP3')
+    payload = build(info, code='FP3')
+    payload.pop('lap_timing')
+    path = tmp_path / '2026_1_FP3_v1.json.gz'
+    path.write_bytes(gzip.compress(json.dumps(payload).encode()))
+    monkeypatch.setattr('archive_replay.CACHE', tmp_path)
+    monkeypatch.setattr('archive_source.load_archive_session', lambda *a, **kw: info)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Saved replay timing must not download telemetry')
+    monkeypatch.setattr('archive_replay.build_archive_replay', forbidden)
+    monkeypatch.setattr('archive_source.fetch_archive_file', forbidden)
+    result = load_archive_replay(2026, 1, 'FP3', refresh=True)
+    assert len(result['lap_timing']['records']) == 2
+    assert result['lap_timing']['available']
+    assert result['cars'] == payload['cars'] and result['times'] == payload['times']
+    assert result['metadata']['source_retrieved_utc'] == payload['metadata']['source_retrieved_utc']
+    assert json.loads(gzip.decompress(path.read_bytes()))['lap_timing'] == result['lap_timing']
+
+
+@pytest.mark.parametrize('field', ['del', 'ff1G', 'pin', 'pout'])
+def test_archive_unknown_exclusion_flags_do_not_invent_valid_laps(field):
+    info = archive(code='FP3')
+    info['lap_columns'].pop(field)
+    timing = build(info, code='FP3')['lap_timing']
+    assert all(lap['valid'] is None for lap in timing['records'])
+    assert timing['available'] is False

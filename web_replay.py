@@ -4,13 +4,17 @@ from datetime import datetime, timezone
 import gzip
 import json
 import math
+import os
 from pathlib import Path
 import re
 import time
+import uuid
 
 import numpy as np
 import pandas as pd
 import requests
+
+from replay_timing import TIMING_VERSION, openf1_lap_timing, unavailable_timing
 
 
 ROOT = Path(__file__).resolve().parent
@@ -316,7 +320,8 @@ def build_browser_replay(session, drivers, laps, locations, *, positions=(), int
                  't': round(stamp, 3)} for stamp, row in _dated(rows, origin) if 0 <= stamp <= duration]
     return {'metadata': metadata, 'track': track, 'drivers': roster, 'times': times.tolist(),
             'cars': cars, 'weather': dated_output(weather), 'race_control': dated_output(race_control),
-            'unavailable': unavailable}
+            'unavailable': unavailable,
+            'lap_timing': openf1_lap_timing(laps, roster, origin, duration, metadata['session_code'])}
 
 
 def _finite_json_number(value):
@@ -393,6 +398,37 @@ def _access_limited_replay(payload, *, completed=False, reason=None, message=Non
     return payload
 
 
+def _enrich_saved_timing(payload, path):
+    if payload.get('lap_timing', {}).get('version') == TIMING_VERSION:
+        return payload
+    from openf1_data import OpenF1AccessError, fetch
+    metadata = payload['metadata']
+    key = metadata.get('session_key')
+    try:
+        if key is None:
+            raise ValueError('Missing session identity')
+        laps = fetch('laps', session_key=key)
+        payload['lap_timing'] = openf1_lap_timing(laps, payload['drivers'], _epoch(metadata['start_utc']),
+                                               metadata['duration_seconds'], metadata['session_code'])
+        temporary = path.with_suffix('.' + uuid.uuid4().hex + '.tmp')
+        try:
+            previous_time = path.stat().st_mtime
+            with gzip.open(temporary, 'wt', encoding='utf-8') as destination:
+                json.dump(payload, destination, separators=(',', ':'), allow_nan=False)
+            temporary.replace(path)
+            os.utime(path, (previous_time, previous_time))
+        except OSError:
+            pass
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except (OpenF1AccessError, requests.RequestException, ValueError, TypeError, KeyError):
+        payload['lap_timing'] = unavailable_timing()
+    return payload
+
+
 def load_browser_replay(year, round_number, session_code, *, refresh=False):
     from openf1_data import OpenF1AccessError
     code = str(session_code).upper()
@@ -402,7 +438,7 @@ def load_browser_replay(year, round_number, session_code, *, refresh=False):
         if cached is not None:
             ttl = 60 if cached['metadata'].get('warnings') or cached['metadata'].get('access_limited') else 3600
             if time.time() - cache_file.stat().st_mtime < ttl:
-                return cached
+                return _enrich_saved_timing(cached, cache_file)
         del cached
     try:
         return _load_browser_replay(year, round_number, code, cache_file, refresh=refresh)
@@ -410,6 +446,7 @@ def load_browser_replay(year, round_number, session_code, *, refresh=False):
         cached = _cached_completed_replay(cache_file, year, round_number, code)
         if cached is None:
             raise
+        cached = _enrich_saved_timing(cached, cache_file)
         return _access_limited_replay(cached, completed=True, reason=getattr(error, 'access_reason', None),
                                       message=str(error))
 

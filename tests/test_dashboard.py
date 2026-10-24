@@ -58,7 +58,8 @@ def dashboard(monkeypatch, tmp_path):
             'LapTime': pd.to_timedelta(range(90, 97), unit='s'),
             'PitInTime': pd.to_timedelta([None] * 7), 'PitOutTime': pd.to_timedelta([None] * 7),
             'TrackStatus': ['1'] * 7, 'IsAccurate': [True] * 7, 'Deleted': [False] * 7,
-            'LapNumber': [1.] * 7, 'Compound': ['SOFT'] * 7, 'TyreLife': [1.] * 7, 'Stint': [1.] * 7})
+            'LapNumber': [1.] * 7, 'Compound': ['SOFT'] * 7, 'TyreLife': [1.] * 7, 'Stint': [1.] * 7,
+            'QualifyingSegment': ['Q1', 'Q1', 'Q1', 'Q2', 'Q2', 'Q3', 'Q3'] if code in ('Q', 'SQ') else [''] * 7})
         source = pd.DataFrame({'DriverNumber': laps.DriverNumber, 'Abbreviation': participants,
             'FullName': participants, 'TeamName': laps.Team, 'Position': range(1, 8),
             'Points': [8., 7., 6., 5., 4., 3., 2.], 'GridPosition': range(1, 8), 'Status': ['Finished'] * 7,
@@ -618,3 +619,23 @@ def test_hosted_archive_source_dates_and_classification_are_honest(hosted_dashbo
     if session_code == 'R':
         assert any('Official classification is not available' in item.value for item in app.info)
         assert not any(item.value.startswith('Published session classification.') for item in app.caption)
+
+
+def test_qualifying_lap_analysis_filters_stage_and_restores_full_field(dashboard):
+    app, _ = dashboard
+    app.selectbox(key='pace-session').set_value('Q').run()
+    next(button for button in app.button if button.label == 'Load lap analysis').click().run()
+    stage = app.selectbox(key='pace-part-2-Q')
+    assert stage.options == ['All qualifying', 'Q1', 'Q2', 'Q3']
+    stage.set_value('Q2').run()
+    assert not app.exception
+    assert next(control for control in app.multiselect if control.label == 'Drivers on lap charts').options == ['HAM', 'RUS']
+    summaries = [item.value for item in app.dataframe if 'median_lap_seconds' in item.value]
+    assert len(summaries) == 1
+    assert dict(zip(summaries[0].Driver, summaries[0].median_lap_seconds)) == {'HAM': 93., 'RUS': 94.}
+    app.selectbox(key='pace-part-2-Q').set_value('All qualifying').run()
+    assert not app.exception
+    assert len(next(control for control in app.multiselect if control.label == 'Drivers on lap charts').options) == 7
+    app.selectbox(key='pace-session').set_value('FP1').run()
+    next(button for button in app.button if button.label == 'Load lap analysis').click().run()
+    assert not any(control.label == 'Qualifying part' for control in app.selectbox)

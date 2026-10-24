@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from replay_strategy import StrategyTimeline
+from replay_timing import build_lap_timing, lap_validity, unavailable_timing
 from web_replay import build_browser_replay, _cached_completed_replay, _thin_records, _track
 
 
@@ -122,6 +123,41 @@ def _strategy(rows, t0, origin):
     session = SimpleNamespace(laps=pd.DataFrame(laps), session_start_time=pd.to_timedelta(relative, unit='s'),
                               track_status=pd.DataFrame({'Time': [pd.to_timedelta(0., unit='s')], 'Status': ['1']}))
     return StrategyTimeline.from_session(session, {'track_statuses': [{'status': '1', 'start_time': -relative}]})
+
+
+def _lap_timing(archive, rows, dated, origin, ending, code):
+    roster = {row['driver']: _integer(row['dn']) for row in archive['drivers']}
+    timed = []
+    for row, start, finish in dated:
+        if row.get('drv') not in roster or _integer(row.get('dNum')) != roster[row['drv']]:
+            continue
+        pit = {}
+        for key in ('pin', 'pout'):
+            value = row.get(key)
+            pit[key] = (False if value in (None, '', 'None') else True if _number(value) is not None else None) if key in row else None
+        coverage_start = _number(row.get('pout'))
+        if coverage_start is not None:
+            coverage_start = start + coverage_start - _number(row['lST'])
+        timed.append({'code': row['drv'], 'lap': row.get('lap'), 'start': start - origin,
+                      'end': finish - origin, 'time': _number(row.get('time')),
+                      'segment': row.get('qs'),
+                      'coverage_start': coverage_start - origin if coverage_start is not None else None,
+                      'valid': lap_validity(deleted=row.get('del'), generated=row.get('ff1G'),
+                                            pit_in=pit['pin'], pit_out=pit['pout'], accurate=row.get('iacc'))})
+    return build_lap_timing(timed, ending - origin, qualifying=code in ('Q', 'SQ'),
+                           note='Unknown deletion, generated lap or pit flags are excluded from valid lap timing.')
+
+
+def _enrich_timing(payload, archive, code):
+    try:
+        rows = _rows(archive['lap_columns'])
+        dated, _, origin, ending = _clock(archive, rows)
+        if (abs(_timestamp(payload['metadata']['start_utc']).timestamp() - origin) > .002
+                or abs(_timestamp(payload['metadata']['end_utc']).timestamp() - ending) > .002):
+            return unavailable_timing('Saved replay and lap timing clocks do not match.')
+        return _lap_timing(archive, rows, dated, origin, ending, code)
+    except (ValueError, KeyError, TypeError, OverflowError):
+        return unavailable_timing()
 
 
 def build_archive_replay(archive, year, round_number, session_code, *, fetch_file=None, workers=4):
@@ -249,6 +285,7 @@ def _build_archive_replay(archive, year, round_number, code, fetch_file, workers
     payload = build_browser_replay(session, drivers, laps, locations, positions=checkpoints,
                                    car_data=cars, weather=weather, race_control=controls, warnings=warnings,
                                    pit_available=False)
+    payload['lap_timing'] = _lap_timing(archive, rows, dated, origin, ending, code)
     strategy = _strategy(rows, t0, origin)
     for driver, values in payload['cars'].items():
         states = [strategy.at(driver, seconds) for seconds in payload['times']]
@@ -329,6 +366,10 @@ def load_archive_replay(year, round_number, session_code, *, refresh=False):
         else:
             unchanged = False
         if unchanged:
+            timing = _enrich_timing(cached, archive, code)
+            if cached.get('lap_timing') != timing:
+                cached['lap_timing'] = timing
+                _save_replay(path, cached)
             if not same_revision:
                 cached['metadata']['checked_archive_revision'] = archive['revision']
             if archive.get('cached_fallback'):

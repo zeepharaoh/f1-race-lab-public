@@ -11,6 +11,8 @@
   }
   const duration = times[times.length - 1];
   const race = ['R', 'S'].includes(metadata.session_code);
+  const qualifying = ['Q', 'SQ'].includes(metadata.session_code);
+  const stagePrefix = metadata.session_code === 'SQ' ? 'SQ' : 'Q';
   const visible = new Set(data.visible_codes || data.drivers.map(driver => driver.code));
   const drivers = data.drivers;
   const finite = value => typeof value === 'number' && Number.isFinite(value);
@@ -19,6 +21,16 @@
   let selected = drivers.filter(driver => visible.has(driver.code)).slice(0, 1).map(driver => driver.code);
   let current = initialTime, playing = false, previous = null, lastUi = -Infinity;
   let showStops = false, gapMode = 'interval', showLabels = true;
+  let selectedSegment = null, playbackStart = times[0], playbackEnd = duration;
+  const timing = data.lap_timing || {};
+  const lapRecords = (timing.records || []).filter(record => drivers.some(driver => driver.code === record.code)
+    && finite(record.end) && finite(record.time) && record.time > 0 && record.valid === true);
+  const stageBounds = new Map();
+  for (const bounds of timing.segments || []) {
+    if ([1,2,3].includes(bounds.segment) && finite(bounds.start) && finite(bounds.end)
+      && bounds.start >= times[0] && bounds.end <= duration && bounds.end > bounds.start
+      && !stageBounds.has(bounds.segment)) stageBounds.set(bounds.segment, bounds);
+  }
   const canvas = el('track'), ctx = canvas.getContext('2d');
   let width = 600, height = 570;
   const fmt = (value, digits = 0) => finite(value) ? value.toFixed(digits) : 'N/A';
@@ -26,6 +38,26 @@
     const whole = Math.max(0, Math.floor(seconds));
     const hours = Math.floor(whole / 3600), minutes = Math.floor(whole % 3600 / 60), secs = whole % 60;
     return (hours ? hours + ':' + String(minutes).padStart(2, '0') : String(minutes).padStart(2, '0')) + ':' + String(secs).padStart(2, '0');
+  }
+  function lapTime(seconds) {
+    if (!finite(seconds)) return 'N/A';
+    const millis = Math.round(seconds * 1000);
+    return Math.floor(millis / 60000) + ':' + String(Math.floor(millis % 60000 / 1000)).padStart(2,'0') + '.' + String(millis % 1000).padStart(3,'0');
+  }
+  function completedTiming(t) {
+    const values = new Map(drivers.map(driver => [driver.code,{best:null,last:null,stages:{}}]));
+    for (const record of lapRecords) {
+      if (record.end > t) continue;
+      const value = values.get(record.code);
+      if ([1,2,3].includes(record.segment)) {
+        const prior = value.stages[record.segment];
+        if (!finite(prior) || record.time < prior) value.stages[record.segment] = record.time;
+      }
+      if (selectedSegment !== null && record.segment !== selectedSegment) continue;
+      if (!finite(value.best) || record.time < value.best) value.best = record.time;
+      if (!value.last || record.end > value.last.end) value.last = record;
+    }
+    return values;
   }
   function sampleIndex(t) {
     let low = 0, high = times.length - 1;
@@ -59,12 +91,29 @@
   el('seek').max = duration;
   el('coverage').textContent = 'Gaps are recorded timing updates. N/A means missing or stale data. Pit stops count recorded pit lane visits.';
   if (!race) {
+    el('gapMode').hidden = true;
     el('gapMode').disabled = true;
-    el('gapMode').title = 'Race gaps are available for Grand Prix and Sprint sessions';
-    el('boardTitle').textContent = 'Session order';
-    el('coverage').textContent = 'Practice and qualifying follow the recorded session clock. Session order is the published timing order, not cars in track order. Race gaps do not apply.';
-  }
-  if (metadata.archived) {
+    el('positionHeading').textContent = 'Rank';
+    el('boardTitle').textContent = qualifying ? 'Qualifying lap times' : 'Practice lap times';
+    el('gapHeading').textContent = qualifying ? stagePrefix + '1' : 'Best';
+    el('backHeading').textContent = qualifying ? stagePrefix + '2' : 'Last valid';
+    el('thirdTimingHeading').textContent = stagePrefix + '3';
+    el('thirdTimingHeading').hidden = !qualifying;
+    el('timingNote').hidden = false;
+    el('timingNote').textContent = 'Best completed valid laps at the replay clock. Rank is calculated from lap times.';
+    el('coverage').textContent = 'N/A means no completed valid lap is available yet. Deleted laps and pit laps are excluded. Unknown validity is excluded. Tyres and stops follow the replay clock.';
+    if (timing.note) el('coverage').textContent += ' ' + timing.note;
+    if (qualifying) {
+      el('segmentControls').hidden = false;
+      for (const segment of [1,2,3]) {
+        const option = text('option', stagePrefix + segment + (stageBounds.has(segment) ? '' : ' unavailable'));
+        option.value = String(segment);
+        option.disabled = !stageBounds.has(segment);
+        el('sessionSegment').append(option);
+      }
+      if (stageBounds.size < 3) el('timingNote').textContent += ' Unavailable stages have no recorded time boundaries.';
+    }
+  } else if (metadata.archived) {
     el('coverage').textContent = [metadata.position_definition, metadata.gap_definition, metadata.pit_definition].filter(Boolean).join(' ');
   }
   const limitations = metadata.limitations || metadata.warnings || [];
@@ -85,9 +134,10 @@
       renderUi(sampleIndex(current)); draw(sampleIndex(current));
     });
     driverCell.append(button);
-    const ahead = text('td', 'N/A'), behind = text('td', 'N/A'), strategy = document.createElement('td');
-    row.append(position, driverCell, ahead, behind, strategy);
-    rows.set(driver.code,{row,position,ahead,behind,strategy,button});
+    const ahead = text('td', 'N/A'), behind = text('td', 'N/A'), third = text('td', 'N/A'), strategy = document.createElement('td');
+    third.hidden = !qualifying;
+    row.append(position, driverCell, ahead, behind, third, strategy);
+    rows.set(driver.code,{row,position,ahead,behind,third,strategy,button});
     el('leaderboard').append(row);
   }
   const trackX = data.track?.x || [], trackY = data.track?.y || [];
@@ -173,19 +223,26 @@
   }
   function renderUi(index) {
     el('clock').textContent=clock(current);el('elapsed').textContent=clock(current);el('seek').value=current;
+    const lapValues = race ? null : completedTiming(current);
     const ordered=[...drivers].sort((a,b)=>{
-      const pa=sample(data.cars[a.code],'position',index),pb=sample(data.cars[b.code],'position',index);
-      return (finite(pa)?pa:999)-(finite(pb)?pb:999)||drivers.indexOf(a)-drivers.indexOf(b);
+      const pa=race?sample(data.cars[a.code],'position',index):lapValues.get(a.code).best;
+      const pb=race?sample(data.cars[b.code],'position',index):lapValues.get(b.code).best;
+      return (finite(pa)?pa:Infinity)-(finite(pb)?pb:Infinity)||drivers.indexOf(a)-drivers.indexOf(b);
     });
     const laps=ordered.map(driver=>sample(data.cars[driver.code],'lap',index)).filter(finite);
     el('lapLabel').textContent=race&&laps.length?'Lap '+Math.max(...laps)+(metadata.total_laps?' / '+metadata.total_laps:''):'Recorded session';
-    ordered.forEach(driver=>{
-      const car=data.cars[driver.code],nodes=rows.get(driver.code),pos=sample(car,'position',index);
+    ordered.forEach((driver,rank)=>{
+      const car=data.cars[driver.code],nodes=rows.get(driver.code);
+      const values = lapValues?.get(driver.code);
+      const pos=race?sample(car,'position',index):(finite(values.best)?rank+1:null);
       nodes.position.textContent=fmt(pos);nodes.row.classList.toggle('selected',selected.includes(driver.code));nodes.row.classList.toggle('filtered',!visible.has(driver.code));
       nodes.button.setAttribute('aria-pressed',String(selected.includes(driver.code)));
-      nodes.ahead.textContent=race?(pos===1?'LEADER':gap(sample(car,gapMode==='leader'?'leader':'ahead',index))):'N/A';
-      nodes.behind.textContent=race&&gapMode==='interval'?gap(sample(car,'behind',index)):' ';
-      nodes.behind.hidden=gapMode==='leader';nodes.strategy.replaceChildren();
+      nodes.ahead.textContent=race?(pos===1?'LEADER':gap(sample(car,gapMode==='leader'?'leader':'ahead',index))):lapTime(qualifying?values.stages[1]:values.best);
+      nodes.behind.textContent=race?(gapMode==='interval'?gap(sample(car,'behind',index)):' '):lapTime(qualifying?values.stages[2]:values.last?.time);
+      nodes.third.textContent=qualifying?lapTime(values.stages[3]):'N/A';
+      nodes.behind.hidden=race&&gapMode==='leader';
+      [nodes.ahead,nodes.behind,nodes.third].forEach((node,i)=>node.classList.toggle('active-segment',qualifying&&selectedSegment===i+1));
+      nodes.strategy.replaceChildren();
       if(showStops){
         const count=sample(car,'stops',index),lap=sample(car,'last_stop_lap',index);
         nodes.strategy.textContent=finite(count)?String(count)+(finite(lap)?' · L'+lap:''):'N/A';
@@ -207,10 +264,24 @@
     ].filter(Boolean).join(' · '):'Recorded positions · interpolated playback';
     renderCards(index);
   }
-  function seek(t) {current=Math.max(times[0],Math.min(duration,t));renderUi(sampleIndex(current));draw(sampleIndex(current));}
+  function seek(t) {current=Math.max(playbackStart,Math.min(playbackEnd,t));renderUi(sampleIndex(current));draw(sampleIndex(current));}
+  function startTime() { return selectedSegment === null ? initialTime : playbackStart; }
+  function togglePlaying() { if (!playing && current >= playbackEnd) seek(startTime()); setPlaying(!playing); }
+  el('sessionSegment').addEventListener('change',event=>{
+    const segment=event.target.value==='all'?null:Number(event.target.value);
+    if (segment!==null&&!stageBounds.has(segment)) {el('sessionSegment').value=selectedSegment===null?'all':String(selectedSegment);return;}
+    selectedSegment=segment;
+    const bounds=stageBounds.get(segment);
+    playbackStart=bounds?bounds.start:times[0];playbackEnd=bounds?bounds.end:duration;
+    el('seek').min=playbackStart;el('seek').max=playbackEnd;el('duration').textContent=clock(playbackEnd);
+    el('timingNote').textContent='Best completed valid laps at the replay clock. Rank uses '+(segment===null?'all qualifying laps.':stagePrefix+segment+' laps.');
+    if (stageBounds.size<3) el('timingNote').textContent+=' Unavailable stages have no recorded time boundaries.';
+    [el('gapHeading'),el('backHeading'),el('thirdTimingHeading')].forEach((node,i)=>node.classList.toggle('active-segment',segment===i+1));
+    setPlaying(false);seek(startTime());
+  });
   function setPlaying(value){playing=value;previous=null;el('play').textContent=playing?'Pause':'Play';el('play').setAttribute('aria-label',playing?'Pause replay':'Play replay');}
-  el('play').addEventListener('click',()=>{if(current>=duration)seek(initialTime);setPlaying(!playing);});
-  el('restart').addEventListener('click',()=>{setPlaying(false);seek(initialTime);});
+  el('play').addEventListener('click',togglePlaying);
+  el('restart').addEventListener('click',()=>{setPlaying(false);seek(startTime());});
   el('back').addEventListener('click',()=>seek(current-10));el('forward').addEventListener('click',()=>seek(current+10));
   el('seek').addEventListener('input',event=>seek(Number(event.target.value)));
   el('strategy').addEventListener('click',()=>{showStops=!showStops;el('strategy').textContent=showStops?'Show tyres':'Show pit stops';el('strategy').setAttribute('aria-pressed',String(showStops));el('strategyHeading').textContent=showStops?'Stops · last lap':'Tyre · age';renderUi(sampleIndex(current));});
@@ -218,7 +289,7 @@
   el('labels').addEventListener('change',event=>{showLabels=event.target.checked;draw(sampleIndex(current));});
   document.addEventListener('keydown',event=>{
     if(['INPUT','SELECT'].includes(event.target.tagName))return;
-    if(event.code==='Space'){event.preventDefault();setPlaying(!playing);}
+    if(event.code==='Space'){event.preventDefault();togglePlaying();}
     if(event.code==='ArrowLeft'){event.preventDefault();seek(current-10);}
     if(event.code==='ArrowRight'){event.preventDefault();seek(current+10);}
   });
@@ -226,10 +297,10 @@
   document.addEventListener('visibilitychange',()=>{previous=null;});
   function animate(now){
     if(playing&&!document.hidden){
-      if(previous!==null)current=Math.min(duration,current+Math.min((now-previous)/1000,.25)*Number(el('speed').value));
+      if(previous!==null)current=Math.min(playbackEnd,current+Math.min((now-previous)/1000,.25)*Number(el('speed').value));
       const index=sampleIndex(current);draw(index);
       if(now-lastUi>150){renderUi(index);lastUi=now;}
-      if(current>=duration){setPlaying(false);renderUi(index);}
+      if(current>=playbackEnd){setPlaying(false);renderUi(index);}
     }
     previous=now;requestAnimationFrame(animate);
   }

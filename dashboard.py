@@ -399,6 +399,16 @@ def app():
                 laps = loaded[1]['clean_laps']
                 if scope != 'All teams':
                     laps = laps[laps.Team.isin(teams)]
+                if lap_code in ('Q', 'SQ'):
+                    prefix = 'SQ' if lap_code == 'SQ' else 'Q'
+                    labels = laps.get('QualifyingSegment', pd.Series('', index=laps.index)).fillna('').astype(str).str.upper()
+                    available = labels.isin([f'{part}{stage}' for part in ('Q', 'SQ') for stage in (1, 2, 3)]).any()
+                    stage = st.selectbox('Qualifying part', ['All qualifying', *[f'{prefix}{part}' for part in (1, 2, 3)]],
+                                         key=f'pace-part-{lap_round}-{lap_code}', disabled=not available)
+                    if not available:
+                        st.caption('Separate qualifying parts are unavailable from this timing source.')
+                    elif stage != 'All qualifying':
+                        laps = laps[labels.isin([f'Q{stage[-1]}', f'SQ{stage[-1]}'])]
                 if laps.empty:
                     st.info('No clean laps are available for this session and comparison scope.')
                 else:

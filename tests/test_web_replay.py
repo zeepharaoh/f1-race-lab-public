@@ -431,3 +431,43 @@ def test_resolver_query_provenance_and_access_status_flag_rebuilt_payload(monkey
     assert 'past sessions' in payload['metadata']['access_message']
     assert payload['metadata']['source_retrieved_utc'] == '2026-03-08T06:00:10+02:00'
     assert payload['metadata']['feed_retrieved_utc']['sessions'] == '2026-03-08T06:00:10+02:00'
+
+
+def test_generic_recorded_lap_times_preserve_unknown_validity():
+    laps = [{'driver_number': 1, 'lap_number': 1, 'date_start': date(0), 'lap_duration': 5,
+             'is_pit_out_lap': False}]
+    timing = replay('FP1', laps=laps)['lap_timing']
+    assert timing['records'] == [{'code': 'AAA', 'lap': 1, 'end': 5, 'time': 5, 'segment': None, 'valid': None}]
+    assert timing['available'] is False
+
+
+def test_generic_explicit_quality_flags_enable_qualifying_lap_timing():
+    laps = [{'driver_number': 1, 'lap_number': 1, 'date_start': date(0), 'lap_duration': 5,
+             'is_pit_out_lap': False, 'is_pit_in_lap': False, 'deleted': False,
+             'fastf1_generated': False, 'is_accurate': True, 'qualifying_segment': 'Q2'}]
+    timing = replay('Q', laps=laps)['lap_timing']
+    assert timing['available']
+    assert timing['records'][0]['end'] == 5 and timing['records'][0]['segment'] == 2
+    assert timing['segments'] == [{'segment': 2, 'start': 0, 'end': 5}]
+
+
+def test_saved_generic_replay_timing_enrichment_only_requests_laps(monkeypatch, tmp_path):
+    payload = replay('FP1')
+    payload.pop('lap_timing')
+    path = tmp_path / '2026_1_FP1_v1.json.gz'
+    path.write_bytes(gzip.compress(json.dumps(payload).encode()))
+    monkeypatch.setattr('web_replay.CACHE', tmp_path)
+    calls = []
+    def fetch(endpoint, **params):
+        calls.append((endpoint, params))
+        if endpoint != 'laps':
+            raise AssertionError('No telemetry or location request is needed')
+        return [{'driver_number': 1, 'lap_number': 1, 'date_start': date(0), 'lap_duration': 5}]
+    _denied_adapter(monkeypatch, fetch=fetch)
+    result = load_browser_replay(2026, 1, 'FP1')
+    assert result['lap_timing']['records'][0]['time'] == 5
+    assert calls == [('laps', {'session_key': 123})]
+    assert result['cars'] == payload['cars']
+    assert json.loads(gzip.decompress(path.read_bytes()))['lap_timing'] == result['lap_timing']
+    load_browser_replay(2026, 1, 'FP1')
+    assert calls == [('laps', {'session_key': 123})]

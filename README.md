@@ -7,8 +7,8 @@ A Python dashboard for the full 2026 Formula 1 season and each race weekend, wit
 Open [F1 Race Lab online](https://f1racelab.streamlit.app/) in a browser with no installation or account. It opens on **Season overview**.
 
 1. Use **Weekend sessions** to choose a weekend and session, then click **Load session data**.
-2. Open **Lap analysis**, select the session and click **Load lap analysis**. Choose drivers and tyre compounds to compare.
-3. Open **Animated replay**, select the session and click **Load browser replay**. Playback runs directly in the page.
+2. Open **Lap analysis**, select the session and click **Load lap analysis**. Choose drivers and tyre compounds to compare. For qualifying, use **Qualifying part** to select all parts, Q1, Q2 or Q3 when stage labels are available.
+3. Open **Animated replay**, select the session and click **Load browser replay**. Playback runs directly in the page. Practice shows best and last valid lap times. Qualifying shows Q1, Q2 and Q3 times; use **Qualifying part** inside the replay to watch one part or return to **All qualifying**. Times follow the replay clock and appear after each lap finishes.
 4. Use **Grand Prix results**, **Season overview** and **Teammates** for race and championship comparisons.
 5. Click **Refresh now** after a session to check newly published data.
 
@@ -116,7 +116,7 @@ Practice and qualifying results help compare sessions; they do not add champions
 
 ### Lap analysis
 
-In **Lap analysis**, select the weekend and session, click **Load lap analysis**, then choose **Drivers on lap charts** and **Tyre compounds**. Each median includes a count of the laps used. You can analyse practice, qualifying, Sprint qualifying, Sprint and Grand Prix laps when their timing is available.
+In **Lap analysis**, select the weekend and session, click **Load lap analysis**, then choose **Drivers on lap charts** and **Tyre compounds**. For qualifying, **Qualifying part** filters the charts, driver list and CSV to Q1, Q2 or Q3. Choose **All qualifying** to restore all recorded parts. Each median includes a count of the laps used. You can analyse practice, qualifying, Sprint qualifying, Sprint and Grand Prix laps when their timing is available.
 
 Compare similar tyres and consider tyre age, fuel, traffic and weather. Median lap time describes the selected laps; it does not isolate car performance.
 
@@ -128,7 +128,10 @@ The online dashboard plays recorded sessions directly in the page. Select the we
 2. Click a driver in the timing tower to show their speed, gear, lap, throttle, brake and DRS status. Select up to three drivers to compare telemetry cards.
 3. Use **Gap display** to switch between gaps ahead and behind or the gap to the leader. Race gaps apply to Grand Prix and Sprint sessions.
 4. Each row shows tyre compound and age in completed laps. Click **Show pit stops** to see recorded pit visits and the lap of the most recent visit. Click **Show tyres** to switch back.
-5. Use **Driver labels** to reduce map clutter. **Restart** resets the recorded session clock.
+5. Practice timing shows **Best** and **Last valid** lap times. Qualifying shows **Q1**, **Q2** and **Q3** together. Choose **Qualifying part** to replay one part, or **All qualifying** for the full recording.
+6. Use **Driver labels** to reduce map clutter. **Restart** resets the current replay range.
+
+Lap times appear only after the recorded lap finishes. The replay timing order is calculated from valid recorded laps, rather than an official classification. Deleted laps and pit laps are excluded. Qualifying ranges use explicitly labelled recorded coverage; missing labels or times remain unavailable. Switching parts reuses the prepared replay and does not download telemetry again.
 
 All session types follow their recorded chronological timeline in the browser, including practice and qualifying. The source and archive publication date appear above the replay. A full race can require more than a thousand small lap files on its first load; requests are limited to four at once and recordings are reduced before playback to keep memory bounded.
 
@@ -267,6 +270,7 @@ Dashboard-launched replay logs are saved to `outputs/replay.log`.
 | `archive_source.py` | Public archive version lookup, bounded downloads and metadata cache |
 | `archive_analysis.py` | Published lap normalization and clean pace comparisons |
 | `archive_replay.py` | Recorded lap telemetry, browser replay and prepared cache |
+| `replay_timing.py` | Completed practice laps and labelled qualifying times |
 | `openf1_data.py` | Backup session timing, source cache and lap normalization |
 | `web_replay.py` | Recorded positions, timing and telemetry for browser playback |
 | `replay_player.py`, `replay_player.html`, `replay_player.js` | Browser replay player and controls |
