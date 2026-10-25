@@ -684,3 +684,15 @@ def test_unavailable_optional_qualifying_does_not_hide_championship(dashboard, m
     assert any(metric.label == 'Championship points' and metric.value == '88' for metric in app.metric)
     assert any('Qualifying classifications are temporarily unavailable' in item.value for item in app.info)
     assert not any('Championship results' in warning.value for warning in app.warning)
+
+
+def test_historical_coverage_notice_keeps_championship_visible(dashboard, monkeypatch):
+    app, _ = dashboard
+    season = data.load_season(2026)
+    notice = 'Latest source coverage differs. Showing matching standings and race results through round 1.'
+    monkeypatch.setattr(data, 'load_season', lambda *args, **kwargs: {**season, 'coverage_notice': notice})
+    st.cache_data.clear()
+    app.run()
+    assert not app.exception
+    assert any(item.value == notice for item in app.warning)
+    assert any(metric.label == 'Championship points' and metric.value == '88' for metric in app.metric)

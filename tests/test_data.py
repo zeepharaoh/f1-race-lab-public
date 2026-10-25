@@ -232,3 +232,111 @@ def test_saved_snapshot_source_identity_and_date_are_validated(monkeypatch, tmp_
     module, _ = season_loader(monkeypatch, tmp_path, season_sources, unavailable={'results'})
     with pytest.raises(requests.HTTPError, match='429'):
         module.load_season(refresh=True)
+
+
+@pytest.fixture
+def publication_gap_sources(season_sources):
+    sources = copy.deepcopy(season_sources)
+    for key in ('constructorStandings', 'driverStandings'):
+        historical = copy.deepcopy(sources[key])
+        historical['url'] = f'https://api.jolpi.ca/ergast/f1/2026/1/{key}/'
+        historical['retrieved_utc'] = '2026-03-01T19:00:00+00:00'
+        sources[f'1/{key}'] = historical
+        sources[key]['pages'][0]['StandingsTable']['StandingsLists'][0]['round'] = '2'
+    return sources
+
+
+def test_cold_publication_gap_fetches_exact_matching_standings(monkeypatch, tmp_path, publication_gap_sources):
+    module, calls = season_loader(monkeypatch, tmp_path, publication_gap_sources)
+    result = module.load_season(refresh=True)
+    assert result['round'] == 1
+    assert result['refresh_error'] is None
+    assert result['coverage_notice'] == ('Latest source coverage differs. Showing matching standings '
+                                         'and race results through round 1.')
+    assert calls == ['constructorStandings', 'driverStandings', 'results', 'sprint', 'calendar',
+                     '1/constructorStandings', '1/driverStandings', 'qualifying']
+    assert len(result['gp']) == 1
+    for key in ('constructorStandings', 'driverStandings'):
+        assert result['sources'][key]['url'].endswith(f'/1/{key}/')
+        assert result['sources'][key]['retrieved_utc'] == '2026-03-01T19:00:00+00:00'
+    assert snapshot_path(tmp_path).exists()
+
+
+def test_cold_recovery_rejects_historical_response_for_another_round(monkeypatch, tmp_path, publication_gap_sources):
+    publication_gap_sources['1/driverStandings']['pages'][0]['StandingsTable']['StandingsLists'][0]['round'] = '2'
+    module, _ = season_loader(monkeypatch, tmp_path, publication_gap_sources)
+    with pytest.raises(ValueError, match='Historical standings do not match'):
+        module.load_season()
+    assert not snapshot_path(tmp_path).exists()
+
+
+def test_matching_historical_snapshot_can_be_reused_after_provider_limit(monkeypatch, tmp_path, publication_gap_sources):
+    module, _ = season_loader(monkeypatch, tmp_path, publication_gap_sources)
+    module.load_season()
+    before = snapshot_path(tmp_path).read_bytes()
+    module, calls = season_loader(monkeypatch, tmp_path, publication_gap_sources, unavailable={'constructorStandings'})
+    result = module.load_season(refresh=True)
+    assert result['round'] == 1
+    assert result['refresh_error']
+    assert result['coverage_notice'] is None
+    assert result['sources']['constructorStandings']['url'].endswith('/1/constructorStandings/')
+    assert result['sources']['driverStandings']['retrieved_utc'] == '2026-03-01T19:00:00+00:00'
+    assert not any(key.startswith('1/') for key in calls)
+    assert snapshot_path(tmp_path).read_bytes() == before
+
+
+def test_historical_recovery_limit_without_snapshot_is_not_saved(monkeypatch, tmp_path, publication_gap_sources):
+    module, _ = season_loader(monkeypatch, tmp_path, publication_gap_sources,
+                              unavailable={'1/driverStandings'})
+    with pytest.raises(requests.HTTPError, match='429'):
+        module.load_season(refresh=True)
+    assert not snapshot_path(tmp_path).exists()
+
+
+def test_cold_recovery_needs_fully_paginated_results(monkeypatch, tmp_path, publication_gap_sources):
+    publication_gap_sources['results']['pages'][0]['total'] = '2'
+    module, calls = season_loader(monkeypatch, tmp_path, publication_gap_sources)
+    with pytest.raises(ValueError, match='do not cover every standings round'):
+        module.load_season()
+    assert not any(key.startswith('1/') for key in calls)
+    assert not snapshot_path(tmp_path).exists()
+
+
+def test_valid_saved_snapshot_takes_priority_over_historical_recovery(monkeypatch, tmp_path, season_sources, publication_gap_sources):
+    module, _ = season_loader(monkeypatch, tmp_path, season_sources)
+    module.load_season()
+    module, calls = season_loader(monkeypatch, tmp_path, publication_gap_sources)
+    result = module.load_season(refresh=True)
+    assert result['round'] == 1 and result['refresh_error']
+    assert result['coverage_notice'] is None
+    assert not any(key.startswith('1/') for key in calls)
+
+
+def test_saved_historical_url_must_match_its_standings_round(monkeypatch, tmp_path, publication_gap_sources):
+    module, _ = season_loader(monkeypatch, tmp_path, publication_gap_sources)
+    module.load_season()
+    saved = json.loads(snapshot_path(tmp_path).read_text())
+    saved['driverStandings']['url'] = 'https://api.jolpi.ca/ergast/f1/2026/2/driverStandings/'
+    snapshot_path(tmp_path).write_text(json.dumps(saved))
+    module, _ = season_loader(monkeypatch, tmp_path, publication_gap_sources,
+                              unavailable={'constructorStandings'})
+    with pytest.raises(requests.HTTPError, match='429'):
+        module.load_season(refresh=True)
+
+
+@pytest.mark.parametrize('damage', ['pages', 'standings', 'infinite_round'])
+def test_invalid_saved_standings_structure_is_rejected_without_index_error(monkeypatch, tmp_path, season_sources, damage):
+    module, _ = season_loader(monkeypatch, tmp_path, season_sources, unavailable={'constructorStandings'})
+    saved = copy.deepcopy(season_sources)
+    if damage == 'pages':
+        saved['constructorStandings']['pages'] = []
+    elif damage == 'standings':
+        saved['constructorStandings']['pages'][0]['StandingsTable']['StandingsLists'] = []
+    else:
+        saved['constructorStandings']['pages'][0]['StandingsTable']['StandingsLists'][0]['round'] = float('inf')
+    bundle = snapshot_path(tmp_path)
+    bundle.parent.mkdir(parents=True)
+    bundle.write_text(json.dumps(saved))
+    assert module._saved_season_sources(bundle, 2026) is None
+    with pytest.raises(requests.HTTPError, match='429'):
+        module.load_season(refresh=True)

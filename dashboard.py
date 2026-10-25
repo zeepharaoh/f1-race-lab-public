@@ -198,6 +198,8 @@ def app():
         season = {**previous, 'refresh_error': 'Refresh unavailable'} if previous is not None else None
         if season is None:
             st.warning('Championship results are temporarily unavailable. Weekend session timing and replay can still be loaded.')
+    if season and season.get('coverage_notice'):
+        st.warning(season['coverage_notice'])
     if season and season.get('refresh_error'):
         st.warning('The results service could not refresh. Showing saved championship data with its original source time.')
     if season and season.get('qualifying_error'):

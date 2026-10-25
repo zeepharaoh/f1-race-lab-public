@@ -101,14 +101,23 @@ def _saved_season_sources(path, year):
             return None
         sources = json.loads(path.read_text())
         core = ['constructorStandings', 'driverStandings', 'results', 'sprint', 'calendar']
-        saved = {key: validate_payload(sources[key], BASE, year, key) for key in core}
+        saved = {}
+        rounds = [int(sources[key]['pages'][0]['StandingsTable']['StandingsLists'][0]['round'])
+                  for key in ('constructorStandings', 'driverStandings')]
+        if rounds[0] != rounds[1] or rounds[0] < 1:
+            return None
+        for key in core:
+            historical = f'{rounds[0]}/{key}'
+            endpoint = (historical if key in ('constructorStandings', 'driverStandings')
+                        and sources[key].get('url') == f'{BASE}/{year}/{historical}/' else key)
+            saved[key] = validate_payload(sources[key], BASE, year, endpoint)
         if 'qualifying' in sources:
             try:
                 saved['qualifying'] = validate_payload(sources['qualifying'], BASE, year, 'qualifying')
             except (ValueError, TypeError, KeyError):
                 pass
         return saved
-    except (OSError, ValueError, TypeError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError):
         return None
 
 
@@ -149,25 +158,65 @@ def _qualifying_source(year, refresh, saved, cutoff):
     return None, empty, 'unavailable', error
 
 
+def _matching_season_sources(sources, year, refresh):
+    from jolpica_client import validate_payload
+    latest = []
+    try:
+        for key in ('constructorStandings', 'driverStandings'):
+            lists = sources[key]['pages'][0]['StandingsTable']['StandingsLists']
+            if len(lists) != 1 or str(lists[0].get('season', year)) != str(year):
+                return None
+            latest.append(int(lists[0]['round']))
+        complete = validate_payload(sources['results'], BASE, year, 'results')
+        races = flatten(complete, 'Results', 'Grand Prix', max(latest))
+        rounds = set(races['round'])
+        cutoff = max(rounds) if rounds else 0
+        if (cutoff < 1 or rounds != set(range(1, cutoff + 1))
+                or not all(value > cutoff for value in latest)):
+            return None
+    except (ValueError, KeyError, TypeError, IndexError):
+        return None
+    matched = dict(sources)
+    for key in ('constructorStandings', 'driverStandings'):
+        endpoint = f'{cutoff}/{key}'
+        source = fetch(year, endpoint, refresh)
+        validated = validate_payload(source, BASE, year, endpoint)
+        lists = validated['pages'][0]['StandingsTable']['StandingsLists']
+        if len(lists) != 1 or int(lists[0]['round']) != cutoff:
+            raise ValueError('Historical standings do not match the results round')
+        for field in ('cached_fallback', 'refresh_error', 'retry_after'):
+            if field in source:
+                validated[field] = source[field]
+        matched[key] = validated
+    return matched, f'Latest source coverage differs. Showing matching standings and race results through round {cutoff}.'
+
+
 def load_season(year=2026, refresh=False):
     bundle = ROOT / 'cache' / 'results' / str(year) / 'last_complete_snapshot.json'
     saved = _saved_season_sources(bundle, year)
-    refresh_error = None
+    refresh_error, coverage_notice, sources = None, None, None
     core = ['constructorStandings', 'driverStandings', 'results', 'sprint', 'calendar']
     try:
         sources = {key: fetch(year, key, refresh) for key in core}
         frames = _season_frames(sources, year)
-        if any(source.get('cached_fallback') for source in sources.values()):
-            refresh_error = 'Some championship sources could not be refreshed. Saved data is shown with its original source times.'
     except (requests.RequestException, ValueError, KeyError, TypeError, IndexError) as error:
-        if saved is None:
-            raise
-        try:
-            sources = {key: saved[key] for key in core}
+        if saved is not None:
+            try:
+                sources = {key: saved[key] for key in core}
+                frames = _season_frames(sources, year)
+            except (ValueError, KeyError, TypeError, IndexError):
+                raise error from None
+            refresh_error = str(error)
+        elif sources is not None:
+            matching = _matching_season_sources(sources, year, refresh)
+            if matching is None:
+                raise error from None
+            sources, coverage_notice = matching
             frames = _season_frames(sources, year)
-        except (ValueError, KeyError, TypeError, IndexError):
-            raise error from None
-        refresh_error = str(error)
+        else:
+            raise
+    if refresh_error is None and any(source.get('cached_fallback') for source in sources.values()):
+        refresh_error = 'Some championship sources could not be refreshed. Saved data is shown with its original source times.'
     source, qualifying, status, error = _qualifying_source(year, refresh, saved, frames['round'])
     if source is not None:
         sources['qualifying'] = source
@@ -175,7 +224,7 @@ def load_season(year=2026, refresh=False):
         _save_season_sources(bundle, sources)
     return {**frames, 'refresh_error': refresh_error, 'qualifying': qualifying, 'sources': sources,
             'qualifying_status': status, 'qualifying_error': error,
-            'qualifying_available': not qualifying.empty}
+            'qualifying_available': not qualifying.empty, 'coverage_notice': coverage_notice}
 
 
 def cumulative_points(results, entity):
