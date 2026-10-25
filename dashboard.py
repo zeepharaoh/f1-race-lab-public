@@ -18,8 +18,8 @@ h1 {letter-spacing:-1.5px;} [data-testid="stMetric"] {background:#151c29;padding
 </style>''', unsafe_allow_html=True)
 
 @st.cache_data(ttl=900, show_spinner='Checking published 2026 results…')
-def season_data():
-    return load_season(2026, refresh=True)
+def season_data(_refresh=False):
+    return load_season(2026, refresh=_refresh)
 
 @st.cache_data(ttl=900, show_spinner='Checking the weekend schedule…')
 def weekend_schedule():
@@ -191,12 +191,20 @@ def session_results(analysis, teams, scope, season=None):
 def app():
     st.title('F1 Race Lab')
     try:
-        season = season_data()
-    except Exception as error:
-        season = None
-        st.warning(f'Championship results are unavailable: {error}. Weekend session timing can still be loaded.')
+        season = season_data(_refresh=st.session_state.pop('season_refresh_requested', False))
+        st.session_state['last_championship'] = season
+    except Exception:
+        previous = st.session_state.get('last_championship')
+        season = {**previous, 'refresh_error': 'Refresh unavailable'} if previous is not None else None
+        if season is None:
+            st.warning('Championship results are temporarily unavailable. Weekend session timing and replay can still be loaded.')
     if season and season.get('refresh_error'):
-        st.warning('Refresh unavailable. Showing the last complete saved snapshot; its check time is shown below. Try Refresh now when your connection returns.')
+        st.warning('The results service could not refresh. Showing saved championship data with its original source time.')
+    if season and season.get('qualifying_error'):
+        if season.get('qualifying_status') == 'saved':
+            st.info('Qualifying classifications use saved data. Their original source time is listed in Sources.')
+        else:
+            st.info('Qualifying classifications are temporarily unavailable. Championship standings, qualifying lap analysis and replay remain available.')
     if season is not None:
         gp, results, qualifying = season['gp'], season['results'], season['qualifying']
     else:
@@ -218,6 +226,7 @@ def app():
                 st.info(f'A refresh was requested recently. Try again in {wait} seconds.')
             else:
                 season_data.clear()
+                st.session_state['season_refresh_requested'] = True
                 weekend_schedule.clear()
                 session_analysis.clear()
                 browser_replay.clear()
@@ -261,8 +270,10 @@ def app():
         st.info('Choose at least one team.')
         return
     if season is not None:
-        source_time = season['sources']['results']['retrieved_utc']
-        st.caption(f'2026 • {gp["round"].nunique()} completed Grands Prix • checked {source_time[:16].replace("T", " ")} UTC')
+        source_times = [source['retrieved_utc'] for name, source in season['sources'].items()
+                        if name != 'qualifying' and source.get('retrieved_utc')]
+        source_time = min(pd.Timestamp(value) for value in source_times).tz_convert('UTC').strftime('%Y-%m-%d %H:%M')
+        st.caption(f'2026 • {gp["round"].nunique()} completed Grands Prix • source retrieved {source_time} UTC')
         checks = season['reconciliation']
         if checks.difference.abs().gt(0.001).any() or season['driver_checks'].difference.abs().gt(0.001).any():
             st.warning('Some points do not reconcile with official standings. Inspect Sources before drawing conclusions.')

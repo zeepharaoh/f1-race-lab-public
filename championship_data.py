@@ -1,6 +1,4 @@
 """Championship points before a replay session."""
-from pathlib import Path
-import json
 import math
 
 import requests
@@ -10,13 +8,8 @@ from weekend import canonical_team
 
 
 def _source(year, endpoint):
-    try:
-        return fetch(year, endpoint), False
-    except requests.RequestException:
-        path = Path(ROOT) / 'cache' / 'results' / str(year) / f'{endpoint}.json'
-        if not path.exists():
-            raise
-        return json.loads(path.read_text()), True
+    payload = fetch(year, endpoint)
+    return payload, bool(payload.get('cached_fallback'))
 
 
 def _points(value):

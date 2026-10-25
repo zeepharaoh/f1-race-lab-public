@@ -15,25 +15,8 @@ COLORS = {'Mercedes': '#27d7c5', 'Ferrari': '#ff4b5b', 'McLaren': '#ff9d2e',
 
 
 def fetch(year, endpoint, refresh=False):
-    path = ROOT / 'cache' / 'results' / str(year) / f'{endpoint}.json'
-    if path.exists() and not refresh and time.time() - path.stat().st_mtime < 3600:
-        return json.loads(path.read_text())
-    url = f'{BASE}/{year}/' if endpoint == 'calendar' else f'{BASE}/{year}/{endpoint}/'
-    pages, offset = [], 0
-    while True:
-        response = requests.get(url,
-                                params={'limit': 100, 'offset': offset}, timeout=45)
-        response.raise_for_status()
-        page = response.json()['MRData']
-        pages.append(page)
-        offset += int(page['limit'])
-        if offset >= int(page['total']):
-            break
-    payload = {'retrieved_utc': datetime.now(timezone.utc).isoformat(), 'url': url, 'pages': pages}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2))
-    return payload
-
+    from jolpica_client import fetch_payload
+    return fetch_payload(ROOT, BASE, year, endpoint, refresh=refresh)
 
 def flatten(payload, key, kind, cutoff):
     rows = []
@@ -60,39 +43,39 @@ def flatten(payload, key, kind, cutoff):
     return frame
 
 
-def load_season(year=2026, refresh=False):
-    bundle = ROOT / 'cache' / 'results' / str(year) / 'last_complete_snapshot.json'
-    refresh_error = None
-    try:
-        sources = {key: fetch(year, key, refresh) for key in ['constructorStandings', 'driverStandings', 'results', 'sprint', 'qualifying', 'calendar']}
-    except requests.RequestException as error:
-        if not bundle.exists():
-            raise
-        sources = json.loads(bundle.read_text())
-        refresh_error = str(error)
-
+def _season_frames(sources, year):
     lists = sources['constructorStandings']['pages'][0]['StandingsTable']['StandingsLists']
-    if not lists:
-        raise ValueError(f'No championship standings available for {year}')
+    if len(lists) != 1:
+        raise ValueError(f'No unambiguous championship standings available for {year}')
     snapshot = lists[0]
+    if str(snapshot.get('season', year)) != str(year):
+        raise ValueError('Constructor standings have different season coverage')
     cutoff = int(snapshot['round'])
+    if cutoff < 1:
+        raise ValueError('No completed championship round is available')
     teams = pd.DataFrame([{'rank': int(t['position']), 'team': t['Constructor']['name'],
                           'team_id': t['Constructor']['constructorId'], 'points': float(t['points']),
                           'wins': int(t['wins'])} for t in snapshot['ConstructorStandings']]).sort_values('rank')
     dlists = sources['driverStandings']['pages'][0]['StandingsTable']['StandingsLists']
-    if not dlists or int(dlists[0]['round']) != cutoff:
+    if len(dlists) != 1 or int(dlists[0]['round']) != cutoff:
         raise ValueError('Driver and constructor standings have different round coverage')
+    if str(dlists[0].get('season', year)) != str(year):
+        raise ValueError('Driver standings have different season coverage')
     drivers = pd.DataFrame([{'rank': int(d['position']), 'driver_id': d['Driver']['driverId'],
                             'driver': d['Driver']['givenName'] + ' ' + d['Driver']['familyName'],
                             'code': d['Driver'].get('code', d['Driver']['familyName']),
                             'team': d['Constructors'][-1]['name'],
                             'points': float(d['points']), 'wins': int(d['wins'])}
                            for d in dlists[0]['DriverStandings']]).sort_values('rank')
+    if any(not float('-inf') < value < float('inf')
+           for frame in (teams, drivers) for field in ('rank', 'points', 'wins') for value in frame[field]):
+        raise ValueError('Championship standings have invalid numeric values')
+    if teams.team_id.duplicated().any() or drivers.driver_id.duplicated().any():
+        raise ValueError('Duplicate championship standings found')
     gp = flatten(sources['results'], 'Results', 'Grand Prix', cutoff)
     sprint = flatten(sources['sprint'], 'SprintResults', 'Sprint', cutoff)
-    qualifying = flatten(sources['qualifying'], 'QualifyingResults', 'Qualifying', cutoff)
     results = pd.concat([gp, sprint], ignore_index=True)
-    if gp['round'].nunique() != cutoff:
+    if set(gp['round']) != set(range(1, cutoff + 1)):
         raise ValueError('Race results do not cover every standings round')
     actual = results.groupby('team').points.sum()
     reconciliation = teams[['team', 'points']].copy().rename(columns={'points': 'official_points'})
@@ -104,14 +87,95 @@ def load_season(year=2026, refresh=False):
     driver_checks['difference'] = driver_checks.results_points - driver_checks.official_points
     calendar = pd.DataFrame([{'round':int(r['round']), 'race':r['raceName'], 'date':r['date'], 'circuit':r['Circuit']['circuitName']}
         for page in sources['calendar']['pages'] for r in page['RaceTable']['Races']]).sort_values('round')
-    if refresh_error is None:
-        bundle.parent.mkdir(parents=True, exist_ok=True)
-        temporary = bundle.with_suffix('.tmp')
-        temporary.write_text(json.dumps(sources))
-        temporary.replace(bundle)
-    return {'refresh_error': refresh_error, 'calendar': calendar, 'year': year, 'round': cutoff, 'teams': teams, 'drivers': drivers, 'gp': gp,
-            'results': results, 'qualifying': qualifying, 'sources': sources,
+    if calendar['round'].duplicated().any() or not set(range(1, cutoff + 1)).issubset(set(calendar['round'])):
+        raise ValueError('Calendar does not cover the championship rounds')
+    return {'calendar': calendar, 'year': year, 'round': cutoff, 'teams': teams,
+            'drivers': drivers, 'gp': gp, 'results': results,
             'reconciliation': reconciliation, 'driver_checks': driver_checks}
+
+
+def _saved_season_sources(path, year):
+    from jolpica_client import validate_payload
+    try:
+        if path.stat().st_size > 96 * 1024 * 1024:
+            return None
+        sources = json.loads(path.read_text())
+        core = ['constructorStandings', 'driverStandings', 'results', 'sprint', 'calendar']
+        saved = {key: validate_payload(sources[key], BASE, year, key) for key in core}
+        if 'qualifying' in sources:
+            try:
+                saved['qualifying'] = validate_payload(sources['qualifying'], BASE, year, 'qualifying')
+            except (ValueError, TypeError, KeyError):
+                pass
+        return saved
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _save_season_sources(path, sources):
+    import uuid
+    temporary = path.with_suffix('.' + uuid.uuid4().hex + '.tmp')
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(sources, allow_nan=False))
+        temporary.replace(path)
+    except OSError:
+        pass
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _qualifying_source(year, refresh, saved, cutoff):
+    error = None
+    try:
+        source = fetch(year, 'qualifying', refresh)
+        qualifying = flatten(source, 'QualifyingResults', 'Qualifying', cutoff)
+        status = 'saved' if source.get('cached_fallback') else 'available'
+        error = source.get('refresh_error') if status == 'saved' else None
+        return source, qualifying, status, error
+    except (requests.RequestException, ValueError, KeyError, TypeError, IndexError) as failure:
+        error = str(failure)
+    if saved and saved.get('qualifying'):
+        try:
+            source = saved['qualifying']
+            qualifying = flatten(source, 'QualifyingResults', 'Qualifying', cutoff)
+            return source, qualifying, 'saved', error
+        except (ValueError, KeyError, TypeError, IndexError):
+            pass
+    empty = flatten({'pages': []}, 'QualifyingResults', 'Qualifying', cutoff)
+    return None, empty, 'unavailable', error
+
+
+def load_season(year=2026, refresh=False):
+    bundle = ROOT / 'cache' / 'results' / str(year) / 'last_complete_snapshot.json'
+    saved = _saved_season_sources(bundle, year)
+    refresh_error = None
+    core = ['constructorStandings', 'driverStandings', 'results', 'sprint', 'calendar']
+    try:
+        sources = {key: fetch(year, key, refresh) for key in core}
+        frames = _season_frames(sources, year)
+        if any(source.get('cached_fallback') for source in sources.values()):
+            refresh_error = 'Some championship sources could not be refreshed. Saved data is shown with its original source times.'
+    except (requests.RequestException, ValueError, KeyError, TypeError, IndexError) as error:
+        if saved is None:
+            raise
+        try:
+            sources = {key: saved[key] for key in core}
+            frames = _season_frames(sources, year)
+        except (ValueError, KeyError, TypeError, IndexError):
+            raise error from None
+        refresh_error = str(error)
+    source, qualifying, status, error = _qualifying_source(year, refresh, saved, frames['round'])
+    if source is not None:
+        sources['qualifying'] = source
+    if refresh_error is None:
+        _save_season_sources(bundle, sources)
+    return {**frames, 'refresh_error': refresh_error, 'qualifying': qualifying, 'sources': sources,
+            'qualifying_status': status, 'qualifying_error': error,
+            'qualifying_available': not qualifying.empty}
 
 
 def cumulative_points(results, entity):

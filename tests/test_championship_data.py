@@ -99,20 +99,27 @@ def test_malformed_sprint_never_leaves_partially_added_points(monkeypatch):
     assert 'Sprint points unavailable' in snapshot['warning']
 
 
-def test_exact_saved_snapshot_fallback_is_labelled(monkeypatch, tmp_path):
-    import json
-    sources(monkeypatch)
-    cache = tmp_path / 'cache' / 'results' / '2026' / '3'
-    cache.mkdir(parents=True)
-    (cache / 'driverStandings.json').write_text(json.dumps(driver_payload()))
-    (cache / 'constructorStandings.json').write_text(json.dumps(constructor_payload()))
-    monkeypatch.setattr(standings, 'ROOT', tmp_path)
-    def unavailable(*args):
-        raise requests.ConnectionError('Offline')
-    monkeypatch.setattr(standings, 'fetch', unavailable)
+def test_saved_client_snapshot_is_labelled(monkeypatch):
+    payloads = {'3/driverStandings': driver_payload(), '3/constructorStandings': constructor_payload()}
+    monkeypatch.setattr(standings, 'fetch',
+        lambda year, endpoint: dict(payloads[endpoint], cached_fallback=True))
     snapshot = standings.load_championship_snapshot(session(), 4, 'R')
     assert snapshot['drivers']['AAA'] == 20
     assert 'Saved snapshot' in snapshot['warning']
+
+
+def test_client_rejected_cache_is_not_loaded_through_another_path(monkeypatch, tmp_path):
+    import json
+    cache = tmp_path / 'cache' / 'results' / '2026' / '3'
+    cache.mkdir(parents=True)
+    (cache / 'driverStandings.json').write_text(json.dumps(driver_payload()))
+    monkeypatch.setattr(standings, 'ROOT', tmp_path, raising=False)
+    def unavailable(*args):
+        raise requests.ConnectionError('No validated cached source')
+    monkeypatch.setattr(standings, 'fetch', unavailable)
+    snapshot = standings.load_championship_snapshot(session(), 4, 'R')
+    assert not snapshot['drivers']
+    assert 'unavailable' in snapshot['warning']
 
 
 def test_duplicate_or_invalid_points_are_rejected():

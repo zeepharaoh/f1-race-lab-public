@@ -80,7 +80,7 @@ The session selector follows the selected weekend's schedule. A regular weekend 
 
 The dashboard checks the schedule, championship data and loaded sessions every **15 minutes while it is open**. **Refresh now** checks the schedule and loaded session data against the source again. Session analysis is available after final timing is published; publication can take time after a session finishes. The app does not provide a live timing feed or make background checks while closed.
 
-If a championship refresh fails, the dashboard can display its last complete saved season snapshot. Loaded session timing remains visible if its refresh fails. Warnings and the original check or load times identify stale data. Weekend timing can still be loaded while championship results are unavailable. Fresh results and uncached telemetry require an internet connection.
+Championship endpoint data is cached for 15 minutes and shared between viewers. Requests use a shared paced queue and a local budget of 400 requests per hour, below the published Jolpica allowance. Other applications on a shared hosting address can still cause provider limits. A manual refresh checks each endpoint at most once per minute. When Jolpica limits requests, the app pauses further requests for the provider cooldown and reuses validated saved data with its original source time. Qualifying classifications load separately, so a qualifying failure does not hide championship standings. If championship sources cannot be refreshed or have inconsistent round coverage, the dashboard can display its last complete saved season snapshot. Loaded session timing remains visible if its refresh fails. Warnings and the original check or load times identify stale data. Weekend timing can still be loaded while championship results are unavailable. Fresh results and uncached telemetry require an internet connection.
 
 ## Dashboard
 
@@ -251,6 +251,7 @@ Replay supports published 2026 sessions. `--session` accepts `FP1`, `FP2`, `FP3`
 | Replay cannot find a display | Start the app from a desktop terminal or launcher. |
 | Driver cards are missing | Click a driver on the replay leaderboard. Hold Shift and click others to compare; enlarge the window for more cards. |
 | Direct FastF1 timing returns 403 | Run the browser version locally with `.venv/bin/python -m streamlit run online.py` to use the free published archive. |
+| Championship refresh is unavailable | The app retains validated saved standings when available. Qualifying classifications can be unavailable independently. Wait for the provider cooldown, then try **Refresh now**. |
 | Session archive is unavailable | New sessions must be published first. Click **Refresh now** later. The app tries the OpenF1 backup and can retain a saved replay. |
 | OpenF1 backup returns 401 | The backup is restricted during a live session. The primary archive does not share this restriction. If the archive has not published the selected session, retry after publication. |
 | Lap chart is empty | Click **Load lap analysis** and select drivers and tyres with available clean laps. |
@@ -274,6 +275,7 @@ Dashboard-launched replay logs are saved to `outputs/replay.log`.
 | `openf1_data.py` | Backup session timing, source cache and lap normalization |
 | `web_replay.py` | Recorded positions, timing and telemetry for browser playback |
 | `replay_player.py`, `replay_player.html`, `replay_player.js` | Browser replay player and controls |
+| `jolpica_client.py` | Shared results caching, request pacing and provider cooldown |
 | `data.py` | Downloads, snapshots, calculations and lap filtering |
 | `weekend.py` | Weekend schedules, session timing and classifications |
 | `main.py` | Animated replay launcher |

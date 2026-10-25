@@ -639,3 +639,48 @@ def test_qualifying_lap_analysis_filters_stage_and_restores_full_field(dashboard
     app.selectbox(key='pace-session').set_value('FP1').run()
     next(button for button in app.button if button.label == 'Load lap analysis').click().run()
     assert not any(control.label == 'Qualifying part' for control in app.selectbox)
+
+
+def test_automatic_season_load_honours_disk_cache_and_manual_refresh_is_explicit(dashboard, monkeypatch):
+    app, _ = dashboard
+    loader = data.load_season
+    requested_refreshes = []
+    def load(*args, **kwargs):
+        requested_refreshes.append(kwargs.get('refresh'))
+        return loader(*args, **kwargs)
+    monkeypatch.setattr(data, 'load_season', load)
+    st.cache_data.clear()
+    app.run()
+    assert requested_refreshes == [False]
+    next(button for button in app.button if button.label == 'Refresh now').click().run()
+    assert requested_refreshes == [False, True]
+    assert not app.exception
+
+
+def test_failed_championship_refresh_retains_last_good_standings(dashboard, monkeypatch):
+    app, _ = dashboard
+    def unavailable(*args, **kwargs):
+        raise ValueError('Race results do not cover every standings round')
+    monkeypatch.setattr(data, 'load_season', unavailable)
+    st.cache_data.clear()
+    app.run()
+    assert not app.exception
+    assert any('Showing saved championship data' in warning.value for warning in app.warning)
+    assert any(metric.label == 'Championship points' and metric.value == '88' for metric in app.metric)
+    assert any('source retrieved 2026-01-01 00:00 UTC' in caption.value for caption in app.caption)
+    assert not any('results are temporarily unavailable' in warning.value for warning in app.warning)
+
+
+def test_unavailable_optional_qualifying_does_not_hide_championship(dashboard, monkeypatch):
+    app, _ = dashboard
+    season = data.load_season(2026)
+    changed = {**season, 'qualifying': season['qualifying'].iloc[:0],
+               'qualifying_error': 'Results service temporarily limited requests',
+               'qualifying_status': 'unavailable'}
+    monkeypatch.setattr(data, 'load_season', lambda *args, **kwargs: changed)
+    st.cache_data.clear()
+    app.run()
+    assert not app.exception
+    assert any(metric.label == 'Championship points' and metric.value == '88' for metric in app.metric)
+    assert any('Qualifying classifications are temporarily unavailable' in item.value for item in app.info)
+    assert not any('Championship results' in warning.value for warning in app.warning)
